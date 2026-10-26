@@ -21,15 +21,21 @@ NATIVE SOURCE ANIMATIONS (2026-10-26)
   an available sequence on that model, rather than modifying its
   bones. Different presets can produce the same result if the
   model has only one usable sitting idle.
-- Looped sitting idles play at normal speed; non-looping sequences
-  are held at a native frame to avoid switching to standing/T-pose.
-- The legacy sit_chair gesture sequence is intentionally NOT the
-  default: on some models it produces exaggerated forward arms.
-  It is still available via "Legacy sit_chair".
-- Some models have NO natural Valve chair-idle animation. The
-  addon cannot conjure an absent animation without a compiled
-  model/animation replacement. It will report this instead of
-  silently forcing an unsuitable pose.
+- Seat animation behavior now matches the original NPC-Sitter_GMod
+  source: choose an existing sequence, ResetSequence, SetCycle(0),
+  SetPlaybackRate(1); NPC_STATE_SCRIPT and SCHED_NONE are used.
+  There is no timer that continually forces a pose or freezes
+  playback at a chosen frame. A custom start frame can be selected.
+- The default "Natural" preset uses the original fallback sequence
+  order: sit_rollercoaster, sit_chair, sit, sit_ground,
+  sit_ground_unarmed. On Dr. Kleiner, sit_chair matches his
+  existing Sit_Chair animation.
+- The "Upright", "Relaxed", "Table/forward", "Vehicle", "Legacy"
+  and "Custom" preset choices, X/Y/Z offsets, rotation settings
+  and NPC-only chair reservation behavior are preserved.
+- As with the original version, an NPC with no supported sitting
+  sequence can still be attached to the chair but may look as if
+  it is standing. Use npc_sitter_list_anims to inspect models.
 
 USAGE
 1. LMB an NPC and then LMB a vehicle chair.
@@ -48,6 +54,6 @@ DIAGNOSTICS
   ACT_BUSY_SIT_CHAIR sequence.
 - To test one of the returned sequences, pick "Custom Source
   sequence" from the menu and copy that sequence name exactly.
-- If the model only lists sit_chair (and it has unnatural arms),
-  the proper fix requires a different original sequence or an
-  actual model animation, not rotating the arms with Lua.
+- The natural preset resolves Kleiner's Sit_Chair sequence
+  (id 837 in the user-tested model). Neither IK nor manually
+  repositioning arms is used.
