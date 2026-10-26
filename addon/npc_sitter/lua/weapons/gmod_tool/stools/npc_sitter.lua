@@ -6,7 +6,8 @@ TOOL.ConfigName = ""
 TOOL.ClientConVar = {
     offset_x = "0", offset_y = "0", offset_z = "0",
     rot_p = "0", rot_y = "0", rot_r = "0",
-    pose = "natural", pose_cycle = "-1", sequence = "", lean = "0"
+    pose = "natural", pose_cycle = "-1", sequence = "", lean = "0",
+    hands = "lap"
 }
 
 -- Many NPC models only offer ONE seated animation, so a sequence dropdown
@@ -16,36 +17,31 @@ TOOL.ClientConVar = {
 -- are fully restored when the NPC leaves the chair.
 -- Most ValveBiped spines bend forward on positive local yaw.
 local BONE_POSTURES = {
+    -- These only adjust torso and head. We position ARMS independently so
+    -- straightening the back cannot raise both hands in front of the face.
     natural = {
-        Spine = Angle(0, -13, 0), Spine1 = Angle(0, -14, 0),
-        Spine2 = Angle(0, -9, 0), Neck1 = Angle(0, 7, 0),
-        Head1 = Angle(0, 4, 0),
-        L_UpperArm = Angle(0, 0, -5), R_UpperArm = Angle(0, 0, 5)
+        Spine = Angle(0, -13, 0), Spine1 = Angle(0, -12, 0),
+        Spine2 = Angle(0, -7, 0), Neck1 = Angle(0, 7, 0),
+        Head1 = Angle(0, 4, 0)
     },
     upright = {
-        Spine = Angle(0, -23, 0), Spine1 = Angle(0, -21, 0),
-        Spine2 = Angle(0, -12, 0), Neck1 = Angle(0, 9, 0),
-        Head1 = Angle(0, 5, 0),
-        L_UpperArm = Angle(0, 0, -10), R_UpperArm = Angle(0, 0, 10)
+        Spine = Angle(0, -22, 0), Spine1 = Angle(0, -17, 0),
+        Spine2 = Angle(0, -10, 0), Neck1 = Angle(0, 9, 0),
+        Head1 = Angle(0, 5, 0)
     },
     relaxed = {
-        Spine = Angle(0, -22, 0), Spine1 = Angle(0, -18, 0),
-        Spine2 = Angle(0, -8, 0), Neck1 = Angle(0, -5, 0),
-        Head1 = Angle(0, -8, 0),
-        L_UpperArm = Angle(0, 0, -21), R_UpperArm = Angle(0, 0, 21),
-        L_Forearm = Angle(0, -9, 0), R_Forearm = Angle(0, 9, 0)
+        Spine = Angle(0, -14, 0), Spine1 = Angle(0, -11, 0),
+        Spine2 = Angle(0, -7, 0), Neck1 = Angle(0, -5, 0),
+        Head1 = Angle(0, -4, 0)
     },
     forward = {
         Spine = Angle(0, 5, 0), Spine1 = Angle(0, 11, 0),
         Spine2 = Angle(0, 7, 0), Neck1 = Angle(0, -7, 0),
-        Head1 = Angle(0, -5, 0),
-        L_UpperArm = Angle(0, 0, -8), R_UpperArm = Angle(0, 0, 8)
+        Head1 = Angle(0, -5, 0)
     },
     ride = {
         Spine = Angle(0, -10, 0), Spine1 = Angle(0, -8, 0),
-        Spine2 = Angle(0, -6, 0), Neck1 = Angle(0, 6, 0),
-        L_UpperArm = Angle(-10, 0, -15),
-        R_UpperArm = Angle(-10, 0, 15)
+        Spine2 = Angle(0, -6, 0), Neck1 = Angle(0, 6, 0)
     },
     custom = {}
 }
@@ -55,10 +51,12 @@ local SPINE_PARTS = {Spine = 0.3, Spine1 = 0.4, Spine2 = 0.3}
 -- Skeleton corrections only control the posture above that base animation.
 -- A non-sitting animation would leave the NPC standing/T-posed.
 local POSES = {
-    natural = {cycle = 0.55, sequences = {"sit_chair_idle", "sit_chair", "sit_idle", "sitting", "sit"}},
-    upright = {cycle = 0.30, sequences = {"sit_chair", "sit_chair_idle", "sit_idle", "sitting", "sit"}},
-    relaxed = {cycle = 0.75, sequences = {"sit_chair_idle", "sit_idle", "sit_chair", "sitting", "sit"}},
-    forward = {cycle = 0.15, sequences = {"sit_chair", "sit_chair_idle", "sit_idle", "sitting", "sit"}},
+    -- At later frames (e.g. sit_chair at 0.75) HL2 NPCs can raise both hands
+    -- to eye height. 0.48 keeps the bent seated legs without that gesture.
+    natural = {cycle = 0.48, sequences = {"sit_chair_idle", "sit_chair", "sit_idle", "sitting", "sit"}},
+    upright = {cycle = 0.48, sequences = {"sit_chair", "sit_chair_idle", "sit_idle", "sitting", "sit"}},
+    relaxed = {cycle = 0.48, sequences = {"sit_chair_idle", "sit_idle", "sit_chair", "sitting", "sit"}},
+    forward = {cycle = 0.48, sequences = {"sit_chair", "sit_chair_idle", "sit_idle", "sitting", "sit"}},
     ride = {cycle = 0.50, sequences = {"sit_rollercoaster", "sit_chair", "sit_chair_idle", "sit_idle", "sit"}},
     custom = {cycle = 0.50, sequences = {}}
 }
@@ -91,9 +89,11 @@ end
 local function GetToolPose(tool)
     local pose = tool:GetClientInfo("pose")
     if not POSES[pose] then pose = "natural" end
+    local hands = tool:GetClientInfo("hands")
+    if hands ~= "lap" and hands ~= "sides" and hands ~= "animation" then hands = "lap" end
     return pose, math.Clamp(tool:GetClientNumber("pose_cycle", -1), -1, 1),
         tool:GetClientInfo("sequence") or "",
-        math.Clamp(tool:GetClientNumber("lean", 0), -60, 60)
+        math.Clamp(tool:GetClientNumber("lean", 0), -60, 60), hands
 end
 
 local function FindSitSequence(npc, pose, frame, customSequence)
@@ -211,6 +211,120 @@ if SERVER then
         return changed
     end
 
+    -- An animation frame alone isn't a reliable way to place arms because
+    -- every NPC model may animate the hands differently. After applying the
+    -- torso pose, aim the two upper-arm/forearm segments at the lap. This
+    -- works on regular ValveBiped NPCs without a custom animation pack.
+    --
+    -- ManipulateBoneAngles uses BONE-LOCAL additive angles, not world axes.
+    -- Derive the adjustment in each bone's current orientation rather than
+    -- guessing static pitch/yaw values for left and right arms.
+    local function BoneMatrix(npc, name)
+        local id = npc:LookupBone("ValveBiped.Bip01_" .. name)
+        if id == nil then return nil, nil end
+        return id, npc:GetBoneMatrix(id)
+    end
+
+    local function AimBoneAt(npc, data, bone, child, target)
+        if bone == nil or child == nil then return false end
+        local matrix = npc:GetBoneMatrix(bone)
+        local nextMatrix = npc:GetBoneMatrix(child)
+        if not matrix or not nextMatrix then return false end
+
+        local origin = matrix:GetTranslation()
+        local childPos = nextMatrix:GetTranslation()
+        local axis = childPos - origin
+        local aim = target - origin
+        if axis:LengthSqr() < 10 or aim:LengthSqr() < 10 then return false end
+
+        -- Validate that +X follows the bone towards its child. Some custom
+        -- NPC skeletons have a different convention; don't break those.
+        local baseAngle = matrix:GetAngles()
+        if baseAngle:Forward():Dot(axis:GetNormalized()) < 0.65 then return false end
+
+        local forward, right, up =
+            baseAngle:Forward(), baseAngle:Right(), baseAngle:Up()
+        local desired = aim:GetNormalized()
+        local localAim = Vector(
+            desired:Dot(forward),
+            -desired:Dot(right),
+            desired:Dot(up)
+        )
+        local delta = localAim:Angle()
+
+        -- Limit extremes to avoid shoulders popping inside the chest.
+        delta.p = math.Clamp(delta.p, -85, 85)
+        delta.y = math.Clamp(delta.y, -85, 85)
+
+        if not data.originalBones[bone] then
+            local original = npc:GetManipulateBoneAngles(bone) or angle_zero
+            data.originalBones[bone] = Angle(original.p, original.y, original.r)
+        end
+        local base = data.originalBones[bone]
+        npc:ManipulateBoneAngles(bone, Angle(
+            base.p + delta.p, base.y + delta.y, base.r
+        ))
+        return true
+    end
+
+    local function ApplyRestingHands(npc, data)
+        if not IsValid(npc) or not data or data.hands == "animation" then return 0 end
+        if not npc.SetupBones or not npc.GetBoneMatrix then return 0 end
+
+        npc:InvalidateBoneCache()
+        npc:SetupBones()
+        local adjusted = 0
+
+        for _, side in ipairs({"L", "R"}) do
+            local upper = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_UpperArm")
+            local forearm = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Forearm")
+            local hand = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Hand")
+            local thigh = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Thigh")
+            local calf = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Calf")
+            if upper and forearm and hand and thigh and calf then
+                local shoulderM = npc:GetBoneMatrix(upper)
+                local hipM = npc:GetBoneMatrix(thigh)
+                local kneeM = npc:GetBoneMatrix(calf)
+                if shoulderM and hipM and kneeM then
+                    local shoulder = shoulderM:GetTranslation()
+                    local hip = hipM:GetTranslation()
+                    local knee = kneeM:GetTranslation()
+                    -- Disregard broken server-side bone matrices on some
+                    -- newer or non-standard models; base 0.48 remains safe.
+                    if shoulder:DistToSqr(hip) < 120 * 120
+                        and hip:DistToSqr(knee) < 100 * 100 then
+                        local sign = side == "R" and 1 or -1
+                        local toSide = npc:GetRight() * sign
+                        local elbowTarget = hip + toSide * 11 + npc:GetUp() * 12
+                        if AimBoneAt(npc, data, upper, forearm, elbowTarget) then
+                            adjusted = adjusted + 1
+                            -- Forearm direction must be computed from the
+                            -- UPDATED shoulder position.
+                            npc:InvalidateBoneCache()
+                            npc:SetupBones()
+                            local handTarget
+                            if data.hands == "sides" then
+                                local elbow = npc:GetBoneMatrix(forearm)
+                                handTarget = elbow and
+                                    (elbow:GetTranslation() - npc:GetUp() * 20 +
+                                    npc:GetForward() * 3) or nil
+                            else
+                                -- Rest palms on mid-thigh, not above the
+                                -- chest. The knee is the calf bone origin.
+                                handTarget = hip * 0.55 + knee * 0.45 +
+                                    npc:GetUp() * 6
+                            end
+                            if handTarget and AimBoneAt(npc, data, forearm, hand, handTarget) then
+                                adjusted = adjusted + 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return adjusted
+    end
+
     local function ApplySitPose(npc, force)
         if not IsValid(npc) then return false end
         local data = npc.NPCSitterData
@@ -226,7 +340,7 @@ if SERVER then
         return true
     end
 
-    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, customSequence, lean)
+    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, customSequence, lean, hands)
         if not IsValid(npc) or not npc.NPCSitterData then
             return false, "NPC is not seated."
         end
@@ -241,6 +355,7 @@ if SERVER then
         data.localAngles = Angle(rotation.p, rotation.y, rotation.r)
         data.pose = pose
         data.lean = lean or 0
+        data.hands = hands or "lap"
         data.sequence = sequence
         data.sequenceName = sequenceName
         data.poseCycle = cycle
@@ -249,7 +364,8 @@ if SERVER then
         npc:SetLocalAngles(data.localAngles)
         ApplySitPose(npc, true)
         local modified = ApplyPoseBones(npc, data)
-        return true, string.format("%s (%s): %d bones adjusted", pose, sequenceName, modified)
+        local arms = ApplyRestingHands(npc, data)
+        return true, string.format("%s (%s): %d posture bones, %d arm bones", pose, sequenceName, modified, arms)
     end
 
     local function RestoreNPC(npc, data, nextToSeat)
@@ -303,7 +419,7 @@ if SERVER then
         return true
     end
 
-    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, customSequence, lean)
+    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, customSequence, lean, hands)
         if not IsValid(npc) or not npc:IsNPC() then return false, "Invalid NPC." end
         if not IsSeat(seat) then return false, "Target is not a vehicle seat." end
         if seat.GetDriver and IsValid(seat:GetDriver()) then
@@ -325,7 +441,7 @@ if SERVER then
             pos = npc:GetPos(), ang = npc:GetAngles(),
             offset = Vector(offset.x, offset.y, offset.z),
             localAngles = Angle(rotation.p, rotation.y, rotation.r),
-            pose = pose, lean = lean or 0,
+            pose = pose, lean = lean or 0, hands = hands or "lap",
             sequence = sequence, sequenceName = sequenceName,
             poseCycle = cycle
         }
@@ -342,7 +458,8 @@ if SERVER then
         npc:SetLocalAngles(npc.NPCSitterData.localAngles)
         ApplySitPose(npc, true)
         local modified = ApplyPoseBones(npc, npc.NPCSitterData)
-        return true, string.format("%s (%s): %d bones adjusted", pose, sequenceName, modified)
+        local arms = ApplyRestingHands(npc, npc.NPCSitterData)
+        return true, string.format("%s (%s): %d posture bones, %d arm bones", pose, sequenceName, modified, arms)
     end
 
     local nextCheck = 0
@@ -523,7 +640,7 @@ function TOOL.BuildCPanel(panel)
             "npc_sitter_rot_p", "npc_sitter_rot_y", "npc_sitter_rot_r"
         }
     })
-    panel:Help("Each pose now changes the NPC skeleton, even if the model only provides one sitting animation.")
+    panel:Help("Sitting presets also adjust body posture. By default arms are guided down to the lap instead of being raised into the air.")
     local combo = panel:ComboBox("Sitting pose", "npc_sitter_pose")
     combo:AddChoice("Natural chair (default)", "natural")
     combo:AddChoice("Upright", "upright")
@@ -531,10 +648,14 @@ function TOOL.BuildCPanel(panel)
     combo:AddChoice("Leaning forward", "forward")
     combo:AddChoice("Rollercoaster / strapped", "ride")
     combo:AddChoice("Custom sequence", "custom")
+    local hands = panel:ComboBox("Hands / arms", "npc_sitter_hands")
+    hands:AddChoice("Hands resting on thighs (default)", "lap")
+    hands:AddChoice("Arms hanging down", "sides")
+    hands:AddChoice("Original animation (no arm correction)", "animation")
     panel:NumSlider("Animation frame (-1 = preset)", "npc_sitter_pose_cycle", -1, 1, 2)
     panel:NumSlider("Extra posture / lean (back < 0 < forward)", "npc_sitter_lean", -60, 60, 0)
     panel:TextEntry("Custom model sequence", "npc_sitter_sequence")
-    panel:Help("Natural and Upright straighten hunched NPCs. The Extra posture slider compensates for different models. Unsupported sitting animations are rejected.")
+    panel:Help("Default frame 0.48 avoids the raised-hands part of sit_chair on HL2 NPCs. If an NPC uses a custom skeleton, choose Original animation.")
     panel:NumSlider("X offset", "npc_sitter_offset_x", -100, 100, 1)
     panel:NumSlider("Y offset", "npc_sitter_offset_y", -100, 100, 1)
     panel:NumSlider("Z offset", "npc_sitter_offset_z", -100, 100, 1)
