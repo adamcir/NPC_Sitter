@@ -635,17 +635,53 @@ if CLIENT then
 
         -- Keep all descendants aligned while rotating the 2 segments.
         if AimSegment(ent, count, upper, forearm, desiredElbow) then
-            AimSegment(ent, count, forearm, hand, target)
+            return AimSegment(ent, count, forearm, hand, target)
         end
+        return false
     end
 
     local function BuildSeatedArmBones(npc, count)
         if not npc:GetNW2Bool("NPCSitter_Seated", false) then return end
         local hands = npc:GetNW2String("NPCSitter_Hands", "lap")
         if hands == "animation" then return end
-        SolveSeatedArm(npc, count, "L", hands)
-        SolveSeatedArm(npc, count, "R", hands)
+        local left = SolveSeatedArm(npc, count, "L", hands)
+        local right = SolveSeatedArm(npc, count, "R", hands)
+        npc.NPCSitterArmLastBuild = SysTime()
+        npc.NPCSitterArmStatus =
+            (left and "L:OK" or "L:skip") .. ", " ..
+            (right and "R:OK" or "R:skip")
     end
+
+    concommand.Add("npc_sitter_debug_arms", function()
+        local ply = LocalPlayer()
+        if not IsValid(ply) then return end
+        local npc = ply:GetEyeTrace().Entity
+        if not IsValid(npc) or not npc:IsNPC() then
+            print("[NPC Sitter] Aim at an NPC and retry npc_sitter_debug_arms")
+            return
+        end
+        print(string.format(
+            "[NPC Sitter] NPC=%s model=%s seated=%s hands=%s",
+            npc:GetClass(), npc:GetModel(),
+            tostring(npc:GetNW2Bool("NPCSitter_Seated", false)),
+            npc:GetNW2String("NPCSitter_Hands", "(not set)")
+        ))
+        local age = npc.NPCSitterArmLastBuild and
+            (SysTime() - npc.NPCSitterArmLastBuild) or -1
+        print(string.format(
+            "[NPC Sitter] Callback=%s last build age=%.2f s arms=%s",
+            tostring(npc.NPCSitterHasArmRig or false), age,
+            npc.NPCSitterArmStatus or "(not computed)"
+        ))
+        for _, name in ipairs({
+            "L_UpperArm", "L_Forearm", "L_Hand",
+            "R_UpperArm", "R_Forearm", "R_Hand"
+        }) do
+            print("  " .. name .. "=" .. tostring(
+                npc:LookupBone("ValveBiped.Bip01_" .. name)
+            ))
+        end
+    end)
 
     -- NPC entities are networked later than stool initialization. Register
     -- once per NPC when it becomes seated, including for joining clients.
