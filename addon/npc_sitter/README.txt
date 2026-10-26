@@ -24,3 +24,17 @@ Models without a valid sitting animation are rejected rather than
 left in a crouched or T-pose. Other addons' custom "E to sit" HUD
 prompts may require integration using the seat's NPCSitter_Reserved
 networked boolean.
+
+POSE NOTES (2026-10-26)
+- Sit_chair around frame 0.75 can lift the NPC's hands in the air.
+  Natural, Upright, Relaxed and Forward now start at the safer 0.48 frame.
+- The Hands / arms control defaults to Hands resting on thighs.
+  It tries to direct the upper arms toward the hips and the forearms
+  toward the lap using ValveBiped bones.
+- Alternative modes: Arms hanging down and Original animation.
+- The arm adjustments require a standard ValveBiped skeleton with
+  usable bone matrices. On unsupported NPC models only the safer
+  animation frame is used. Change Hands to Original animation if
+  another addon is also controlling the arms.
+- Aim at the seated NPC or chair and LMB after changing a setting.
+- Restart Garry's Mod after installing the updated Lua file.
