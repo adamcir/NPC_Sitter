@@ -527,21 +527,36 @@ if CLIENT then
     end
 
     local function RotateBoneSubtree(ent, count, root, pivot, axis, degrees)
-        local radians = math.rad(degrees)
-        for bone = 0, count - 1 do
-            if IsDescendant(ent, bone, root) and
-                ent:GetBoneName(bone) ~= "__INVALIDBONE__" then
-                local matrix = ent:GetBoneMatrix(bone)
-                if matrix then
-                    local pos = matrix:GetTranslation()
-                    local angles = matrix:GetAngles()
-                    angles:RotateAroundAxis(axis, degrees)
-                    matrix:SetTranslation(pivot + RotateVectorAxis(
-                        pos - pivot, axis, radians
-                    ))
-                    matrix:SetAngles(angles)
-                    ent:SetBoneMatrix(bone, matrix)
+        -- Cache descendants: repeated full-skeleton walks on every render
+        -- would be expensive in populated maps with many seated NPCs.
+        local cache = ent.NPCSitterArmChildCache
+        if not cache or cache.count ~= count or cache.model ~= ent:GetModel() then
+            cache = {count = count, model = ent:GetModel(), children = {}}
+            ent.NPCSitterArmChildCache = cache
+        end
+        local bones = cache.children[root]
+        if not bones then
+            bones = {}
+            for bone = 0, count - 1 do
+                if IsDescendant(ent, bone, root) and
+                    ent:GetBoneName(bone) ~= "__INVALIDBONE__" then
+                    bones[#bones + 1] = bone
                 end
+            end
+            cache.children[root] = bones
+        end
+        local radians = math.rad(degrees)
+        for _, bone in ipairs(bones) do
+            local matrix = ent:GetBoneMatrix(bone)
+            if matrix then
+                local pos = matrix:GetTranslation()
+                local angles = matrix:GetAngles()
+                angles:RotateAroundAxis(axis, degrees)
+                matrix:SetTranslation(pivot + RotateVectorAxis(
+                    pos - pivot, axis, radians
+                ))
+                matrix:SetAngles(angles)
+                ent:SetBoneMatrix(bone, matrix)
             end
         end
     end
