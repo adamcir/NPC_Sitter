@@ -40,3 +40,10 @@ POSE NOTES (2026-10-26)
   addon is also controlling the arms.
 - Aim at the seated NPC or chair and LMB after changing a setting.
 - Restart Garry's Mod after installing the updated Lua file.
+
+DIAGNOSTICS
+- In the CLIENT console, aim at the seated NPC and enter:
+    npc_sitter_debug_arms
+  Output includes whether the NPC is networked as seated, whether the
+  BuildBonePositions callback runs, left/right IK status, and bone names.
+  If the arms still raise after installing, copy this output.
