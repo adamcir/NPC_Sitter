@@ -21,15 +21,20 @@ NATIVE SOURCE ANIMATIONS (2026-10-26)
   an available sequence on that model, rather than modifying its
   bones. Different presets can produce the same result if the
   model has only one usable sitting idle.
-- Seat animation behavior now matches the original NPC-Sitter_GMod
-  source: choose an existing sequence, ResetSequence, SetCycle(0),
-  SetPlaybackRate(1); NPC_STATE_SCRIPT and SCHED_NONE are used.
-  There is no timer that continually forces a pose or freezes
-  playback at a chosen frame. A custom start frame can be selected.
-- The default "Natural" preset uses the original fallback sequence
-  order: sit_rollercoaster, sit_chair, sit, sit_ground,
-  sit_ground_unarmed. On Dr. Kleiner, sit_chair matches his
-  existing Sit_Chair animation.
+- The original NPC-Sitter_GMod code supplied the seating/parenting
+  approach. Native model animations are now deliberately held at a
+  seated frame with SetPlaybackRate(0); the original version could
+  finish an animation and leave the NPC in a T-pose.
+- A lightweight Think guard restores the original Source seated
+  sequence if the engine NPC AI changes it.
+- The "Natural" preset now prioritizes native Sit_Chair/chair-idle
+  before rollercoaster/couch fallback animations. Dr. Kleiner has
+  Sit_Chair (id 837 in the user's model). This avoids the hunched
+  rollercoaster default. For custom models with only couch sequences,
+  choose a better one through Custom Source sequence if available.
+- "Sitting pose frame" (-1 = automatic) chooses which original
+  animated frame to hold. You can adjust it per model/seat without
+  changing the skeleton.
 - The "Upright", "Relaxed", "Table/forward", "Vehicle", "Legacy"
   and "Custom" preset choices, X/Y/Z offsets, rotation settings
   and NPC-only chair reservation behavior are preserved.
