@@ -14,10 +14,10 @@ TOOL.ClientConVar = {
 -- manufacture different poses when the model only contains one idle.
 local VALVE_POSES = {
     natural = {"sit_chair_idle", "Sit_Chair02", "Sit_Chair03",
-        "sitchairtable1", "sitcouchfeet1", "sitcouchknees1",
-        "sitcouch1", "drinker_sit_idle", "sit_idle", "sitting"},
+        "sitcouchfeet1", "sitcouchknees1", "sitcouch1",
+        "sit_idle", "sitting"},
     upright = {"Sit_Chair02", "Sit_Chair03", "sit_chair_idle",
-        "sitchairtable1", "sitcouchfeet1", "sit_idle", "sitting"},
+        "sitcouchfeet1", "sit_idle", "sitting"},
     relaxed = {"sitcouchfeet1", "sitcouchknees1", "sitcouch1",
         "sitccouchtv1", "Sit_Chair03", "sit_chair_idle", "sit_idle"},
     forward = {"sitchairtable1", "sitcouchknees1", "Sit_Chair02",
