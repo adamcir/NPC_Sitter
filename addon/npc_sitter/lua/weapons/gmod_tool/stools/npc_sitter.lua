@@ -9,24 +9,29 @@ TOOL.ClientConVar = {
     pose = "natural", pose_cycle = "-1", sequence = ""
 }
 
--- Keep the existing presets and settings. Natural now uses the SAME
--- sequence priority as the original NPC-Sitter_GMod example, including
--- sit_chair (called Sit_Chair in models/kleiner.mdl).
-local ORIGINAL_SIT_PRIORITY = {
-    "sit_rollercoaster", "sit_chair", "sit",
-    "sit_ground", "sit_ground_unarmed"
+-- Prefer real seated-in-chair animations over rollercoaster/ground/couch
+-- poses, which either crouch or pull the legs up on several custom models.
+-- Keep the existing presets and XYZ/rotation/frame controls unchanged.
+local CHAIR_IDLE = {
+    "Sit_Chair", "sit_chair_idle", "sit_chair",
+    "Sit_Chair02", "Sit_Chair03", "sit_idle", "sitting",
+    "sitchairtable1"
+}
+local BACKUP_SIT = {
+    "sitcouchknees1", "sitcouch1", "sitcouchfeet1",
+    "sitccouchtv1", "sit", "sit_rollercoaster"
 }
 local VALVE_POSES = {
-    natural = ORIGINAL_SIT_PRIORITY,
+    natural = CHAIR_IDLE,
     upright = {"Sit_Chair", "Sit_Chair02", "Sit_Chair03",
-        "sit_chair_idle", "sit_idle", "sitting"},
-    relaxed = {"sitcouchfeet1", "sitcouchknees1", "sitcouch1",
-        "sitccouchtv1", "Sit_Chair", "Sit_Chair03",
-        "sit_chair_idle", "sit_idle"},
-    forward = {"sitchairtable1", "sitcouchknees1", "Sit_Chair",
-        "Sit_Chair02", "sit_chair_idle", "sit_idle"},
-    ride = {"sit_rollercoaster", "sit", "Sit_Chair", "sit_chair_idle"},
-    chair = {"sit_chair", "Sit_Chair", "sit_chair_idle",
+        "sit_chair_idle", "sit_chair", "sit_idle", "sitting"},
+    relaxed = {"sitcouchknees1", "sitcouch1", "Sit_Chair",
+        "sit_chair_idle", "sitcouchfeet1", "sit_chair"},
+    forward = {"sitchairtable1", "Sit_Chair",
+        "Sit_Chair02", "sit_chair", "sit_idle"},
+    ride = {"sit_rollercoaster", "sit", "Sit_Chair",
+        "sit_chair", "sit_chair_idle"},
+    chair = {"Sit_Chair", "sit_chair", "sit_chair_idle",
         "Sit_Chair02", "sit_idle"}
 }
 
@@ -86,40 +91,71 @@ local function FindSitSequence(npc, pose, frame, customName)
             return nil, nil, nil, nil,
                 "This NPC model does not have the sequence '" .. name .. "'."
         end
+        local lowered = string.lower(sequenceName)
+        if not (lowered:find("sit", 1, true)
+            or lowered:find("chair", 1, true)
+            or lowered:find("couch", 1, true)) then
+            return nil, nil, nil, nil,
+                "Custom animation must be a sitting/chair/couch sequence."
+        end
     else
-        -- Exactly like the uploaded addon, try the named sequences in
-        -- order. Other tool presets still control the preferred order.
-        for _, candidate in ipairs(VALVE_POSES[pose] or ORIGINAL_SIT_PRIORITY) do
+        local candidates = VALVE_POSES[pose] or CHAIR_IDLE
+        for _, candidate in ipairs(candidates) do
             sequence, sequenceName = FindNamedSequence(npc, candidate)
             if sequence ~= nil then break end
         end
-
-        -- All existing presets have an original-addon fallback. With
-        -- Kleiner, 'sit_chair' resolves to his real looping Sit_Chair.
         if sequence == nil then
-            for _, candidate in ipairs(ORIGINAL_SIT_PRIORITY) do
+            -- Before declaring failure, try the native Source sitting
+            -- activity. On Dr. Kleiner it resolves to Sit_Chair (#837).
+            local act = rawget(_G, "ACT_BUSY_SIT_CHAIR")
+            if act then
+                local native = npc:SelectWeightedSequence(act)
+                if native and native >= 0 then
+                    local nativeName = npc:GetSequenceName(native)
+                    if nativeName and nativeName:lower():find("sit", 1, true) then
+                        sequence, sequenceName = native, nativeName
+                    end
+                end
+            end
+        end
+        if sequence == nil then
+            -- Last resort for models shipped only with couch/rollercoaster
+            -- animations. Unlike the old addon, never pretend standing
+            -- or T-pose to be a valid seated animation.
+            for _, candidate in ipairs(BACKUP_SIT) do
                 sequence, sequenceName = FindNamedSequence(npc, candidate)
                 if sequence ~= nil then break end
             end
         end
     end
 
-    -- Original addon starts a new sequence at cycle 0, with playback rate 1.
-    -- Keep the existing frame control: a non-default value changes only the
-    -- starting point, without stopping the animation on that frame.
-    local startCycle = (frame and frame >= 0)
-        and math.Clamp(frame, 0, 1) or 0
-
     if sequence == nil then
-        -- Match the uploaded addon: still allow attaching an NPC whose
-        -- model has no sitting animation; don't fake a bone-based pose.
-        return -1, "(none on this model)", startCycle, false
+        return nil, nil, nil, nil,
+            "Model " .. (npc:GetModel() or "(unknown)") ..
+            " has no usable sitting sequence; NPC was left standing. " ..
+            "Aim at it and run npc_sitter_list_anims."
     end
+
+    -- A genuine Source sitting pose, frozen at a stable interior frame,
+    -- prevents BOTH transitions to T-pose and the crouched mid-gesture
+    -- appearance in the old sit_rollercoaster default.
+    -- Player-controlled 'pose_cycle' always takes precedence.
+    local defaultFrame = 0.30
+    local nameLower = string.lower(sequenceName)
+    if nameLower:find("rollercoaster", 1, true) then
+        defaultFrame = 0.50
+    elseif nameLower:find("sitcouch", 1, true) then
+        defaultFrame = 0.40
+    elseif nameLower == "sit_chair" then
+        defaultFrame = 0.24
+    end
+    local heldFrame = (frame and frame >= 0)
+        and math.Clamp(frame, 0.02, 0.98) or defaultFrame
 
     local info = npc:GetSequenceInfo(sequence)
     local looping = info and info.flags
         and bit.band(info.flags, 1) ~= 0 or false
-    return sequence, sequenceName, startCycle, looping
+    return sequence, sequenceName, heldFrame, looping
 end
 
 if SERVER then
@@ -152,18 +188,31 @@ if SERVER then
         if IsReservedSeat(ent) then return false end
     end)
 
-    -- Original NPC-Sitter_GMod behavior: set the selected native Source
-    -- sequence ONCE at placement/update, start it, and let it run normally.
-    -- Do not freeze at the middle frame, impose ACT_DO_NOT_DISTURB, or
-    -- repeatedly reset animations in Think (these altered the original pose).
-    local function ApplySitPose(npc)
+    -- Keep the native Source seated sequence active and held on a safe
+    -- frame. Non-looping model animations otherwise return to standing or
+    -- T-pose; engine NPCs may also replace sequences via their AI.
+    local function ApplySitPose(npc, force)
         if not IsValid(npc) then return false end
         local data = npc.NPCSitterData
-        if not data then return false end
-        if data.sequence and data.sequence >= 0 then
+        if not data or data.sequence == nil then return false end
+
+        if npc:GetNPCState() ~= NPC_STATE_SCRIPT then
+            npc:SetNPCState(NPC_STATE_SCRIPT)
+        end
+        if rawget(_G, "ACT_DO_NOT_DISTURB") and npc.SetIdealActivity then
+            npc:SetIdealActivity(ACT_DO_NOT_DISTURB)
+        end
+
+        if force or npc:GetSequence() ~= data.sequence then
             npc:ResetSequence(data.sequence)
-            npc:SetCycle(data.poseCycle or 0)
-            npc:SetPlaybackRate(1)
+            npc:ResetSequenceInfo()
+        end
+
+        -- With a held frame we preserve the MODEL'S authored joints and
+        -- arms; absolutely no procedural bone manipulation is necessary.
+        npc:SetPlaybackRate(0)
+        if force or math.abs(npc:GetCycle() - data.poseCycle) > 0.005 then
+            npc:SetCycle(data.poseCycle)
         end
         return true
     end
@@ -189,9 +238,9 @@ if SERVER then
         if npc:GetParent() ~= data.seat then npc:SetParent(data.seat) end
         npc:SetLocalPos(data.offset)
         npc:SetLocalAngles(data.localAngles)
-        ApplySitPose(npc)
-        return true, string.format("Source sequence %s, playback 1x%s",
-            name, seq < 0 and " (no sit animation in model)" or "")
+        ApplySitPose(npc, true)
+        return true, string.format("Source seated pose: %s (frame %.2f)",
+            name, cycle)
     end
 
     local function RestoreNPC(npc, data, nextToSeat)
@@ -276,28 +325,37 @@ if SERVER then
         seat.NPCSitterNPC = npc
         NPC_SITTER.SeatedNPCs[npc] = true
         npc:SetNPCState(NPC_STATE_SCRIPT)
-        npc:SetSchedule(SCHED_NONE)
+        npc:SetSchedule(SCHED_WAIT_FOR_SCRIPT)
         npc:SetMoveType(MOVETYPE_NONE)
         npc:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
         npc:SetParent(seat)
         npc:SetLocalPos(npc.NPCSitterData.offset)
         npc:SetLocalAngles(npc.NPCSitterData.localAngles)
-        ApplySitPose(npc)
-        return true, string.format("Source sequence %s, playback 1x%s",
-            sequenceName, sequence < 0 and " (no sit animation in model)" or "")
+        ApplySitPose(npc, true)
+        return true, string.format("Source seated pose: %s (frame %.2f)",
+            sequenceName, cycle)
     end
 
-    -- Keep only validity/seat cleanup. The original addon does not
-    -- continuously force a seated frame, parent transform or activity.
     local nextCheck = 0
     hook.Add("Think", "NPCSitter_HoldSitPose", function()
         if CurTime() < nextCheck then return end
-        nextCheck = CurTime() + 0.5
+        nextCheck = CurTime() + 0.08
         for npc in pairs(NPC_SITTER.SeatedNPCs) do
             if not IsValid(npc) or not npc.NPCSitterData then
                 NPC_SITTER.SeatedNPCs[npc] = nil
-            elseif not IsValid(npc.NPCSitterData.seat) then
-                NPC_SITTER.UnseatNPC(npc, false)
+            else
+                local data = npc.NPCSitterData
+                if not IsValid(data.seat) then
+                    NPC_SITTER.UnseatNPC(npc, false)
+                else
+                    -- Keep positions synced while the chair moves.
+                    if npc:GetParent() ~= data.seat then
+                        npc:SetParent(data.seat)
+                    end
+                    npc:SetLocalPos(data.offset)
+                    npc:SetLocalAngles(data.localAngles)
+                    ApplySitPose(npc, false)
+                end
             end
         end
     end)
@@ -498,8 +556,8 @@ function TOOL.BuildCPanel(panel)
     combo:AddChoice("Legacy sit_chair (may gesture)", "chair")
     combo:AddChoice("Custom Source sequence", "custom")
     panel:TextEntry("Custom Source sequence name", "npc_sitter_sequence")
-    panel:NumSlider("Animation start frame (-1 = start)", "npc_sitter_pose_cycle", -1, 1, 2)
-    panel:Help("Seating now works like the original NPC Sitter: play the selected model sequence once at 1x speed without freezing it. The frame slider sets the starting frame (default -1 starts at 0). Aim at an NPC and run npc_sitter_list_anims to list animations.")
+    panel:NumSlider("Sitting pose frame (-1 = automatic)", "npc_sitter_pose_cycle", -1, 1, 2)
+    panel:Help("The original Source animation is held at a stable sitting frame to prevent T-pose, without rotating model bones. Avoids the crouched rollercoaster pose by preferring chair-idle. For uncommon models, adjust the pose frame. Use npc_sitter_list_anims to inspect available animations.")
     panel:NumSlider("X offset", "npc_sitter_offset_x", -100, 100, 1)
     panel:NumSlider("Y offset", "npc_sitter_offset_y", -100, 100, 1)
     panel:NumSlider("Z offset", "npc_sitter_offset_z", -100, 100, 1)
