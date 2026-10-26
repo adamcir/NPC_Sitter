@@ -211,120 +211,6 @@ if SERVER then
         return changed
     end
 
-    -- An animation frame alone isn't a reliable way to place arms because
-    -- every NPC model may animate the hands differently. After applying the
-    -- torso pose, aim the two upper-arm/forearm segments at the lap. This
-    -- works on regular ValveBiped NPCs without a custom animation pack.
-    --
-    -- ManipulateBoneAngles uses BONE-LOCAL additive angles, not world axes.
-    -- Derive the adjustment in each bone's current orientation rather than
-    -- guessing static pitch/yaw values for left and right arms.
-    local function BoneMatrix(npc, name)
-        local id = npc:LookupBone("ValveBiped.Bip01_" .. name)
-        if id == nil then return nil, nil end
-        return id, npc:GetBoneMatrix(id)
-    end
-
-    local function AimBoneAt(npc, data, bone, child, target)
-        if bone == nil or child == nil then return false end
-        local matrix = npc:GetBoneMatrix(bone)
-        local nextMatrix = npc:GetBoneMatrix(child)
-        if not matrix or not nextMatrix then return false end
-
-        local origin = matrix:GetTranslation()
-        local childPos = nextMatrix:GetTranslation()
-        local axis = childPos - origin
-        local aim = target - origin
-        if axis:LengthSqr() < 10 or aim:LengthSqr() < 10 then return false end
-
-        -- Validate that +X follows the bone towards its child. Some custom
-        -- NPC skeletons have a different convention; don't break those.
-        local baseAngle = matrix:GetAngles()
-        if baseAngle:Forward():Dot(axis:GetNormalized()) < 0.65 then return false end
-
-        local forward, right, up =
-            baseAngle:Forward(), baseAngle:Right(), baseAngle:Up()
-        local desired = aim:GetNormalized()
-        local localAim = Vector(
-            desired:Dot(forward),
-            -desired:Dot(right),
-            desired:Dot(up)
-        )
-        local delta = localAim:Angle()
-
-        -- Limit extremes to avoid shoulders popping inside the chest.
-        delta.p = math.Clamp(delta.p, -85, 85)
-        delta.y = math.Clamp(delta.y, -85, 85)
-
-        if not data.originalBones[bone] then
-            local original = npc:GetManipulateBoneAngles(bone) or angle_zero
-            data.originalBones[bone] = Angle(original.p, original.y, original.r)
-        end
-        local base = data.originalBones[bone]
-        npc:ManipulateBoneAngles(bone, Angle(
-            base.p + delta.p, base.y + delta.y, base.r
-        ))
-        return true
-    end
-
-    local function ApplyRestingHands(npc, data)
-        if not IsValid(npc) or not data or data.hands == "animation" then return 0 end
-        if not npc.SetupBones or not npc.GetBoneMatrix then return 0 end
-
-        npc:InvalidateBoneCache()
-        npc:SetupBones()
-        local adjusted = 0
-
-        for _, side in ipairs({"L", "R"}) do
-            local upper = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_UpperArm")
-            local forearm = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Forearm")
-            local hand = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Hand")
-            local thigh = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Thigh")
-            local calf = npc:LookupBone("ValveBiped.Bip01_" .. side .. "_Calf")
-            if upper and forearm and hand and thigh and calf then
-                local shoulderM = npc:GetBoneMatrix(upper)
-                local hipM = npc:GetBoneMatrix(thigh)
-                local kneeM = npc:GetBoneMatrix(calf)
-                if shoulderM and hipM and kneeM then
-                    local shoulder = shoulderM:GetTranslation()
-                    local hip = hipM:GetTranslation()
-                    local knee = kneeM:GetTranslation()
-                    -- Disregard broken server-side bone matrices on some
-                    -- newer or non-standard models; base 0.48 remains safe.
-                    if shoulder:DistToSqr(hip) < 120 * 120
-                        and hip:DistToSqr(knee) < 100 * 100 then
-                        local sign = side == "R" and 1 or -1
-                        local toSide = npc:GetRight() * sign
-                        local elbowTarget = hip + toSide * 11 + npc:GetUp() * 12
-                        if AimBoneAt(npc, data, upper, forearm, elbowTarget) then
-                            adjusted = adjusted + 1
-                            -- Forearm direction must be computed from the
-                            -- UPDATED shoulder position.
-                            npc:InvalidateBoneCache()
-                            npc:SetupBones()
-                            local handTarget
-                            if data.hands == "sides" then
-                                local elbow = npc:GetBoneMatrix(forearm)
-                                handTarget = elbow and
-                                    (elbow:GetTranslation() - npc:GetUp() * 20 +
-                                    npc:GetForward() * 3) or nil
-                            else
-                                -- Rest palms on mid-thigh, not above the
-                                -- chest. The knee is the calf bone origin.
-                                handTarget = hip * 0.55 + knee * 0.45 +
-                                    npc:GetUp() * 6
-                            end
-                            if handTarget and AimBoneAt(npc, data, forearm, hand, handTarget) then
-                                adjusted = adjusted + 1
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        return adjusted
-    end
-
     local function ApplySitPose(npc, force)
         if not IsValid(npc) then return false end
         local data = npc.NPCSitterData
@@ -356,6 +242,10 @@ if SERVER then
         data.pose = pose
         data.lean = lean or 0
         data.hands = hands or "lap"
+        -- The client calculates arm positions with actual up-to-date
+        -- render bones (server bone matrices can be stale or invalid).
+        npc:SetNW2String("NPCSitter_Hands", data.hands)
+        npc:SetNW2Bool("NPCSitter_Seated", true)
         data.sequence = sequence
         data.sequenceName = sequenceName
         data.poseCycle = cycle
@@ -364,11 +254,13 @@ if SERVER then
         npc:SetLocalAngles(data.localAngles)
         ApplySitPose(npc, true)
         local modified = ApplyPoseBones(npc, data)
-        local arms = ApplyRestingHands(npc, data)
-        return true, string.format("%s (%s): %d posture bones, %d arm bones", pose, sequenceName, modified, arms)
+        return true, string.format("%s (%s): %d torso bones; arms adjusted clientside",
+            pose, sequenceName, modified)
     end
 
     local function RestoreNPC(npc, data, nextToSeat)
+        npc:SetNW2Bool("NPCSitter_Seated", false)
+        npc:SetNW2String("NPCSitter_Hands", "animation")
         RestorePoseBones(npc, data)
         local seat = data.seat
         npc:SetParent(NULL)
@@ -446,6 +338,8 @@ if SERVER then
             poseCycle = cycle
         }
         ReserveSeat(seat)
+        npc:SetNW2String("NPCSitter_Hands", npc.NPCSitterData.hands)
+        npc:SetNW2Bool("NPCSitter_Seated", true)
         seat.NPCSitterNPC = npc
         NPC_SITTER.SeatedNPCs[npc] = true
         npc:SetNPCState(NPC_STATE_SCRIPT)
@@ -458,8 +352,8 @@ if SERVER then
         npc:SetLocalAngles(npc.NPCSitterData.localAngles)
         ApplySitPose(npc, true)
         local modified = ApplyPoseBones(npc, npc.NPCSitterData)
-        local arms = ApplyRestingHands(npc, npc.NPCSitterData)
-        return true, string.format("%s (%s): %d posture bones, %d arm bones", pose, sequenceName, modified, arms)
+        return true, string.format("%s (%s): %d torso bones; arms adjusted clientside",
+            pose, sequenceName, modified)
     end
 
     local nextCheck = 0
@@ -605,6 +499,170 @@ function TOOL:Reload(trace)
 end
 
 if CLIENT then
+
+    -- Client rendering bone matrices are authoritative for the visible model.
+    -- Server GetBoneMatrix may be stale/invalid, which made our previous
+    -- hand-to-lap solver stop at the chest. This 2-bone IK works during
+    -- BuildBonePositions and does not mutate the server NPC skeleton.
+    --
+    -- Each upper arm and forearm rotates its entire descendant subtree,
+    -- including hands/fingers, so there is no detached wrist or fist.
+    local function RotateVectorAxis(v, axis, radians)
+        local c, sn = math.cos(radians), math.sin(radians)
+        return v * c + axis:Cross(v) * sn +
+            axis * (axis:Dot(v) * (1 - c))
+    end
+
+    local function IsDescendant(ent, bone, root)
+        local current = bone
+        local safeguard = 0
+        while current ~= nil and current >= 0 and safeguard < 80 do
+            if current == root then return true end
+            local parent = ent:GetBoneParent(current)
+            if parent == nil or parent == current then break end
+            current = parent
+            safeguard = safeguard + 1
+        end
+        return false
+    end
+
+    local function RotateBoneSubtree(ent, count, root, pivot, axis, degrees)
+        local radians = math.rad(degrees)
+        for bone = 0, count - 1 do
+            if IsDescendant(ent, bone, root) and
+                ent:GetBoneName(bone) ~= "__INVALIDBONE__" then
+                local matrix = ent:GetBoneMatrix(bone)
+                if matrix then
+                    local pos = matrix:GetTranslation()
+                    local angles = matrix:GetAngles()
+                    angles:RotateAroundAxis(axis, degrees)
+                    matrix:SetTranslation(pivot + RotateVectorAxis(
+                        pos - pivot, axis, radians
+                    ))
+                    matrix:SetAngles(angles)
+                    ent:SetBoneMatrix(bone, matrix)
+                end
+            end
+        end
+    end
+
+    local function AimSegment(ent, count, root, child, target)
+        local parentM = ent:GetBoneMatrix(root)
+        local childM = ent:GetBoneMatrix(child)
+        if not parentM or not childM then return false end
+        local pivot = parentM:GetTranslation()
+        local current = childM:GetTranslation() - pivot
+        local desired = target - pivot
+        if current:LengthSqr() < 16 or desired:LengthSqr() < 16 then
+            return false
+        end
+
+        local u = current:GetNormalized()
+        local v = desired:GetNormalized()
+        local dot = math.Clamp(u:Dot(v), -1, 1)
+        if dot > 0.99999 then return true end
+
+        local axis = u:Cross(v)
+        if axis:LengthSqr() < 0.000001 then
+            -- Antiparallel segments need a stable fallback axis.
+            axis = u:Cross(ent:GetUp())
+            if axis:LengthSqr() < 0.000001 then
+                axis = u:Cross(ent:GetRight())
+            end
+        end
+        axis:Normalize()
+        RotateBoneSubtree(ent, count, root, pivot, axis, math.deg(math.acos(dot)))
+        return true
+    end
+
+    local function GetMatrixPosition(ent, bone)
+        if not bone then return nil end
+        local m = ent:GetBoneMatrix(bone)
+        return m and m:GetTranslation() or nil
+    end
+
+    local function SolveSeatedArm(ent, count, side, hands)
+        local prefix = "ValveBiped.Bip01_" .. side .. "_"
+        local upper = ent:LookupBone(prefix .. "UpperArm")
+        local forearm = ent:LookupBone(prefix .. "Forearm")
+        local hand = ent:LookupBone(prefix .. "Hand")
+        local thigh = ent:LookupBone(prefix .. "Thigh")
+        local calf = ent:LookupBone(prefix .. "Calf")
+        if not (upper and forearm and hand and thigh and calf) then return end
+
+        local shoulder = GetMatrixPosition(ent, upper)
+        local elbow = GetMatrixPosition(ent, forearm)
+        local wrist = GetMatrixPosition(ent, hand)
+        local hip = GetMatrixPosition(ent, thigh)
+        local knee = GetMatrixPosition(ent, calf)
+        if not (shoulder and elbow and wrist and hip and knee) then return end
+
+        local a = shoulder:Distance(elbow)
+        local b = elbow:Distance(wrist)
+        if a < 6 or a > 35 or b < 6 or b > 35 then return end
+
+        local sideSign = side == "R" and 1 or -1
+        local target
+        if hands == "sides" then
+            target = hip - ent:GetUp() * 13 +
+                ent:GetRight() * (sideSign * 8)
+        else
+            -- Upper thigh, near the hip; palms stay below the chest.
+            target = hip * 0.70 + knee * 0.30 + ent:GetUp() * 4
+        end
+
+        local toHand = target - shoulder
+        local distance = toHand:Length()
+        if distance < 1 then return end
+        local direction = toHand / distance
+        local minReach = math.abs(a - b) + 0.5
+        local maxReach = a + b - 0.5
+        if minReach >= maxReach then return end
+        -- Clamp unreachable targets rather than pointing the elbows upward.
+        local reach = math.Clamp(distance, minReach, maxReach)
+        target = shoulder + direction * reach
+
+        -- Analytical 2-bone IK: choose an elbow on the OUTSIDE of the
+        -- torso, then put the hand on the thigh. Both segments retain their
+        -- exact original lengths; no world-axis guessing is involved.
+        local projected = (a * a - b * b + reach * reach) / (2 * reach)
+        local height = math.sqrt(math.max(0, a * a - projected * projected))
+        local outside = ent:GetRight() * sideSign - ent:GetForward() * 0.18
+        local pole = outside - direction * outside:Dot(direction)
+        if pole:LengthSqr() < 0.001 then return end
+        pole:Normalize()
+        local desiredElbow = shoulder + direction * projected + pole * height
+
+        -- Keep all descendants aligned while rotating the 2 segments.
+        if AimSegment(ent, count, upper, forearm, desiredElbow) then
+            AimSegment(ent, count, forearm, hand, target)
+        end
+    end
+
+    local function BuildSeatedArmBones(npc, count)
+        if not npc:GetNW2Bool("NPCSitter_Seated", false) then return end
+        local hands = npc:GetNW2String("NPCSitter_Hands", "lap")
+        if hands == "animation" then return end
+        SolveSeatedArm(npc, count, "L", hands)
+        SolveSeatedArm(npc, count, "R", hands)
+    end
+
+    -- NPC entities are networked later than stool initialization. Register
+    -- once per NPC when it becomes seated, including for joining clients.
+    local nextArmScan = 0
+    hook.Add("Think", "NPCSitter_ClientArmRig", function()
+        if CurTime() < nextArmScan then return end
+        nextArmScan = CurTime() + 0.7
+        for _, npc in ipairs(ents.GetAll()) do
+            if npc:IsNPC() and
+                npc:GetNW2Bool("NPCSitter_Seated", false) and
+                not npc.NPCSitterHasArmRig then
+                npc:AddCallback("BuildBonePositions", BuildSeatedArmBones)
+                npc.NPCSitterHasArmRig = true
+            end
+        end
+    end)
+
     language.Add("tool.npc_sitter.name", "NPC Sitter")
     language.Add("tool.npc_sitter.desc", "Seat NPCs with poses and live offsets.")
     language.Add("tool.npc_sitter.0",
@@ -655,7 +713,7 @@ function TOOL.BuildCPanel(panel)
     panel:NumSlider("Animation frame (-1 = preset)", "npc_sitter_pose_cycle", -1, 1, 2)
     panel:NumSlider("Extra posture / lean (back < 0 < forward)", "npc_sitter_lean", -60, 60, 0)
     panel:TextEntry("Custom model sequence", "npc_sitter_sequence")
-    panel:Help("Default frame 0.48 avoids the raised-hands part of sit_chair on HL2 NPCs. If an NPC uses a custom skeleton, choose Original animation.")
+    panel:Help("Hands resting on thighs uses render-time 2-bone arm posing on ValveBiped NPCs. The Original animation setting disables it. Restart GMod after updating the addon.")
     panel:NumSlider("X offset", "npc_sitter_offset_x", -100, 100, 1)
     panel:NumSlider("Y offset", "npc_sitter_offset_y", -100, 100, 1)
     panel:NumSlider("Z offset", "npc_sitter_offset_z", -100, 100, 1)
