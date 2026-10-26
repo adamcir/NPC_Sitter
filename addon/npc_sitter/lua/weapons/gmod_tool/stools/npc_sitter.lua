@@ -6,11 +6,54 @@ TOOL.ConfigName = ""
 TOOL.ClientConVar = {
     offset_x = "0", offset_y = "0", offset_z = "0",
     rot_p = "0", rot_y = "0", rot_r = "0",
-    pose = "natural", pose_cycle = "-1", sequence = ""
+    pose = "natural", pose_cycle = "-1", sequence = "", lean = "0"
 }
 
--- Choose real sitting animations: the old rollercoaster fallback made
--- many NPCs look unnaturally crouched.
+-- Many NPC models only offer ONE seated animation, so a sequence dropdown
+-- alone cannot produce different poses. In addition to picking a supported
+-- sequence, each preset now modifies the actual ValveBiped skeleton.
+-- The angles below are additive to any pre-existing bone manipulation and
+-- are fully restored when the NPC leaves the chair.
+-- Most ValveBiped spines bend forward on positive local yaw.
+local BONE_POSTURES = {
+    natural = {
+        Spine = Angle(0, -13, 0), Spine1 = Angle(0, -14, 0),
+        Spine2 = Angle(0, -9, 0), Neck1 = Angle(0, 7, 0),
+        Head1 = Angle(0, 4, 0),
+        L_UpperArm = Angle(0, 0, -5), R_UpperArm = Angle(0, 0, 5)
+    },
+    upright = {
+        Spine = Angle(0, -23, 0), Spine1 = Angle(0, -21, 0),
+        Spine2 = Angle(0, -12, 0), Neck1 = Angle(0, 9, 0),
+        Head1 = Angle(0, 5, 0),
+        L_UpperArm = Angle(0, 0, -10), R_UpperArm = Angle(0, 0, 10)
+    },
+    relaxed = {
+        Spine = Angle(0, -22, 0), Spine1 = Angle(0, -18, 0),
+        Spine2 = Angle(0, -8, 0), Neck1 = Angle(0, -5, 0),
+        Head1 = Angle(0, -8, 0),
+        L_UpperArm = Angle(0, 0, -21), R_UpperArm = Angle(0, 0, 21),
+        L_Forearm = Angle(0, -9, 0), R_Forearm = Angle(0, 9, 0)
+    },
+    forward = {
+        Spine = Angle(0, 5, 0), Spine1 = Angle(0, 11, 0),
+        Spine2 = Angle(0, 7, 0), Neck1 = Angle(0, -7, 0),
+        Head1 = Angle(0, -5, 0),
+        L_UpperArm = Angle(0, 0, -8), R_UpperArm = Angle(0, 0, 8)
+    },
+    ride = {
+        Spine = Angle(0, -10, 0), Spine1 = Angle(0, -8, 0),
+        Spine2 = Angle(0, -6, 0), Neck1 = Angle(0, 6, 0),
+        L_UpperArm = Angle(-10, 0, -15),
+        R_UpperArm = Angle(-10, 0, 15)
+    },
+    custom = {}
+}
+local SPINE_PARTS = {Spine = 0.3, Spine1 = 0.4, Spine2 = 0.3}
+
+-- The sequence is still important: it bends the legs into a sitting pose.
+-- Skeleton corrections only control the posture above that base animation.
+-- A non-sitting animation would leave the NPC standing/T-posed.
 local POSES = {
     natural = {cycle = 0.55, sequences = {"sit_chair_idle", "sit_chair", "sit_idle", "sitting", "sit"}},
     upright = {cycle = 0.30, sequences = {"sit_chair", "sit_chair_idle", "sit_idle", "sitting", "sit"}},
@@ -49,7 +92,8 @@ local function GetToolPose(tool)
     local pose = tool:GetClientInfo("pose")
     if not POSES[pose] then pose = "natural" end
     return pose, math.Clamp(tool:GetClientNumber("pose_cycle", -1), -1, 1),
-        tool:GetClientInfo("sequence") or ""
+        tool:GetClientInfo("sequence") or "",
+        math.Clamp(tool:GetClientNumber("lean", 0), -60, 60)
 end
 
 local function FindSitSequence(npc, pose, frame, customSequence)
@@ -111,6 +155,62 @@ if SERVER then
         if IsReservedSeat(ent) then return false end
     end)
 
+    -- Per-model bone indices; cache original bone angles once to avoid
+    -- compounding transforms every time the preset changes.
+    local function RestorePoseBones(npc, data)
+        if not data or not data.originalBones then return end
+        for boneId, original in pairs(data.originalBones) do
+            if IsValid(npc) then npc:ManipulateBoneAngles(boneId, original) end
+        end
+        data.originalBones = nil
+        data.poseBones = nil
+    end
+
+    local function ApplyPoseBones(npc, data)
+        if not IsValid(npc) or not data then return 0 end
+        data.originalBones = data.originalBones or {}
+        local preset = BONE_POSTURES[data.pose] or BONE_POSTURES.natural
+        local corrections = {}
+        for name, delta in pairs(preset) do corrections[name] = delta end
+
+        -- Extra control lets the player counter a model with an especially
+        -- strong baked-in slouch without changing the chosen pose.
+        local lean = data.lean or 0
+        for name, weight in pairs(SPINE_PARTS) do
+            local delta = corrections[name] or angle_zero
+            corrections[name] = Angle(delta.p, delta.y + lean * weight, delta.r)
+        end
+
+        local changed = 0
+        local touched = {}
+        for shortName, correction in pairs(corrections) do
+            local boneId = npc:LookupBone("ValveBiped.Bip01_" .. shortName)
+            if boneId ~= nil then
+                if not data.originalBones[boneId] then
+                    local base = npc:GetManipulateBoneAngles(boneId)
+                    data.originalBones[boneId] = Angle(base.p, base.y, base.r)
+                end
+                local original = data.originalBones[boneId]
+                npc:ManipulateBoneAngles(boneId, Angle(
+                    original.p + correction.p,
+                    original.y + correction.y,
+                    original.r + correction.r
+                ))
+                touched[boneId] = true
+                changed = changed + 1
+            end
+        end
+
+        -- Reset bones used by the *previous* preset but not by this one.
+        for boneId, original in pairs(data.originalBones) do
+            if not touched[boneId] then
+                npc:ManipulateBoneAngles(boneId, original)
+            end
+        end
+        data.poseBones = touched
+        return changed
+    end
+
     local function ApplySitPose(npc, force)
         if not IsValid(npc) then return false end
         local data = npc.NPCSitterData
@@ -126,7 +226,7 @@ if SERVER then
         return true
     end
 
-    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, customSequence)
+    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, customSequence, lean)
         if not IsValid(npc) or not npc.NPCSitterData then
             return false, "NPC is not seated."
         end
@@ -140,6 +240,7 @@ if SERVER then
         data.offset = Vector(offset.x, offset.y, offset.z)
         data.localAngles = Angle(rotation.p, rotation.y, rotation.r)
         data.pose = pose
+        data.lean = lean or 0
         data.sequence = sequence
         data.sequenceName = sequenceName
         data.poseCycle = cycle
@@ -147,10 +248,12 @@ if SERVER then
         npc:SetLocalPos(data.offset)
         npc:SetLocalAngles(data.localAngles)
         ApplySitPose(npc, true)
-        return true
+        local modified = ApplyPoseBones(npc, data)
+        return true, string.format("%s (%s): %d bones adjusted", pose, sequenceName, modified)
     end
 
     local function RestoreNPC(npc, data, nextToSeat)
+        RestorePoseBones(npc, data)
         local seat = data.seat
         npc:SetParent(NULL)
         npc:SetPlaybackRate(1)
@@ -200,7 +303,7 @@ if SERVER then
         return true
     end
 
-    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, customSequence)
+    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, customSequence, lean)
         if not IsValid(npc) or not npc:IsNPC() then return false, "Invalid NPC." end
         if not IsSeat(seat) then return false, "Target is not a vehicle seat." end
         if seat.GetDriver and IsValid(seat:GetDriver()) then
@@ -222,7 +325,8 @@ if SERVER then
             pos = npc:GetPos(), ang = npc:GetAngles(),
             offset = Vector(offset.x, offset.y, offset.z),
             localAngles = Angle(rotation.p, rotation.y, rotation.r),
-            pose = pose, sequence = sequence, sequenceName = sequenceName,
+            pose = pose, lean = lean or 0,
+            sequence = sequence, sequenceName = sequenceName,
             poseCycle = cycle
         }
         ReserveSeat(seat)
@@ -237,7 +341,8 @@ if SERVER then
         npc:SetLocalPos(npc.NPCSitterData.offset)
         npc:SetLocalAngles(npc.NPCSitterData.localAngles)
         ApplySitPose(npc, true)
-        return true
+        local modified = ApplyPoseBones(npc, npc.NPCSitterData)
+        return true, string.format("%s (%s): %d bones adjusted", pose, sequenceName, modified)
     end
 
     local nextCheck = 0
@@ -304,7 +409,7 @@ function TOOL:LeftClick(trace)
         local ok, err = NPC_SITTER.UpdateTransform(
             seated, GetToolOffset(self), GetToolRotation(self), GetToolPose(self)
         )
-        owner:ChatPrint(ok and "[NPC Sitter] Pose and transform updated."
+        owner:ChatPrint(ok and ("[NPC Sitter] Pose updated: " .. (err or ""))
             or "[NPC Sitter] " .. (err or "Update failed."))
         return ok
     end
@@ -339,7 +444,7 @@ function TOOL:LeftClick(trace)
     end
     self.SelectedNPC = nil
     owner:SetNW2Entity("NPCSitter_SelectedNPC", NULL)
-    owner:ChatPrint("[NPC Sitter] NPC seated. LMB seat to update pose/offset.")
+    owner:ChatPrint("[NPC Sitter] NPC seated: " .. (err or "") .. ". LMB seat to update.")
     return true
 end
 
@@ -418,7 +523,7 @@ function TOOL.BuildCPanel(panel)
             "npc_sitter_rot_p", "npc_sitter_rot_y", "npc_sitter_rot_r"
         }
     })
-    panel:Help("Pose availability depends on the NPC model.")
+    panel:Help("Each pose now changes the NPC skeleton, even if the model only provides one sitting animation.")
     local combo = panel:ComboBox("Sitting pose", "npc_sitter_pose")
     combo:AddChoice("Natural chair (default)", "natural")
     combo:AddChoice("Upright", "upright")
@@ -427,8 +532,9 @@ function TOOL.BuildCPanel(panel)
     combo:AddChoice("Rollercoaster / strapped", "ride")
     combo:AddChoice("Custom sequence", "custom")
     panel:NumSlider("Animation frame (-1 = preset)", "npc_sitter_pose_cycle", -1, 1, 2)
+    panel:NumSlider("Extra posture / lean (back < 0 < forward)", "npc_sitter_lean", -60, 60, 0)
     panel:TextEntry("Custom model sequence", "npc_sitter_sequence")
-    panel:Help("Unsupported models are not forced into a crouched or T-pose.")
+    panel:Help("Natural and Upright straighten hunched NPCs. The Extra posture slider compensates for different models. Unsupported sitting animations are rejected.")
     panel:NumSlider("X offset", "npc_sitter_offset_x", -100, 100, 1)
     panel:NumSlider("Y offset", "npc_sitter_offset_y", -100, 100, 1)
     panel:NumSlider("Z offset", "npc_sitter_offset_z", -100, 100, 1)
