@@ -432,8 +432,10 @@ function TOOL:LeftClick(trace)
     end
 
     if not IsValid(selected) and IsValid(seated) then
+        local pose, frame, customSequence = GetToolPose(self)
         local ok, err = NPC_SITTER.UpdateTransform(
-            seated, GetToolOffset(self), GetToolRotation(self), GetToolPose(self),
+            seated, GetToolOffset(self), GetToolRotation(self),
+            pose, frame, customSequence,
             GetSeatMode(self, seated.NPCSitterData.seat)
         )
         owner:ChatPrint(ok and ("[NPC Sitter] Pose updated: " .. (err or ""))
@@ -462,9 +464,10 @@ function TOOL:LeftClick(trace)
         owner:ChatPrint("[NPC Sitter] LMB a vehicle seat or Reload to cancel.")
         return false
     end
+    local pose, frame, customSequence = GetToolPose(self)
     local ok, err = NPC_SITTER.SeatNPC(
-        selected, ent, GetToolOffset(self), GetToolRotation(self), GetToolPose(self),
-        GetSeatMode(self, ent)
+        selected, ent, GetToolOffset(self), GetToolRotation(self),
+        pose, frame, customSequence, GetSeatMode(self, ent)
     )
     if not ok then
         owner:ChatPrint("[NPC Sitter] " .. (err or "Could not seat NPC."))
