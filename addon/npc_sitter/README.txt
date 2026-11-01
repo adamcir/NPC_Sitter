@@ -62,3 +62,14 @@ DIAGNOSTICS
 - The natural preset resolves Kleiner's Sit_Chair sequence
   (id 837 in the user-tested model). Neither IK nor manually
   repositioning arms is used.
+
+SEAT MODES
+- Automatic (default): detect prop_vehicle_prisoner_pod and use the
+  prisoner-pod setting; otherwise use the regular chair mode.
+- Regular chair: native Source chair sitting pose.
+- Prisoner pod: native Source chair sitting pose, held at a stable
+  animation frame to avoid finishing in a T-pose.
+- Both modes retain the previous pose presets, custom sequence,
+  XYZ offsets, rotation sliders, reserved seat locks, and LMB updates.
+- A model without any native sitting animation is rejected instead
+  of being left T-posed. A supported sequence is required.
