@@ -6,7 +6,8 @@ TOOL.ConfigName = ""
 TOOL.ClientConVar = {
     offset_x = "0", offset_y = "0", offset_z = "0",
     rot_p = "0", rot_y = "0", rot_r = "0",
-    pose = "natural", pose_cycle = "-1", sequence = ""
+    pose = "natural", pose_cycle = "-1", sequence = "",
+    seat_mode = "auto"
 }
 
 -- Prefer real seated-in-chair animations over rollercoaster/ground/couch
@@ -43,6 +44,28 @@ local function IsSeat(ent)
         or string.StartWith(class, "prop_vehicle_")
 end
 
+local function DetectSeatMode(seat)
+    if not IsValid(seat) then return "chair" end
+    -- Prisoner pods are scripted driveable seats, frequently used as
+    -- passenger seats. Never infer the mode from the NPC model.
+    local class = seat:GetClass()
+    if class == "prop_vehicle_prisoner_pod" then return "prisoner_pod" end
+    local model = string.lower(seat:GetModel() or "")
+    if string.find(model, "prisoner_pod", 1, true)
+        or string.find(model, "prisonerpod", 1, true) then
+        return "prisoner_pod"
+    end
+    return "chair"
+end
+
+local function GetSeatMode(tool, seat)
+    local selected = tool:GetClientInfo("seat_mode")
+    if selected == "chair" or selected == "prisoner_pod" then
+        return selected
+    end
+    return DetectSeatMode(seat)
+end
+
 local function IsReservedSeat(ent)
     return IsSeat(ent) and
         (ent.NPCSitterReserved == true or ent:GetNW2Bool("NPCSitter_Reserved", false))
@@ -77,7 +100,7 @@ local function FindNamedSequence(npc, desired)
     end
 end
 
-local function FindSitSequence(npc, pose, frame, customName)
+local function FindSitSequence(npc, pose, frame, customName, seatMode)
     if not IsValid(npc) then return nil, nil, nil, nil, "Invalid NPC." end
     local sequence, sequenceName
 
@@ -100,6 +123,11 @@ local function FindSitSequence(npc, pose, frame, customName)
         end
     else
         local candidates = VALVE_POSES[pose] or CHAIR_IDLE
+        if seatMode == "prisoner_pod" and pose == "natural" then
+            -- In a pod, favor a standard chair animation, never the
+            -- rollercoaster/couch feet-up animation by default.
+            candidates = CHAIR_IDLE
+        end
         for _, candidate in ipairs(candidates) do
             sequence, sequenceName = FindNamedSequence(npc, candidate)
             if sequence ~= nil then break end
@@ -148,6 +176,9 @@ local function FindSitSequence(npc, pose, frame, customName)
         defaultFrame = 0.40
     elseif nameLower == "sit_chair" then
         defaultFrame = 0.24
+    end
+    if seatMode == "prisoner_pod" and nameLower == "sit_chair" then
+        defaultFrame = 0.32
     end
     local heldFrame = (frame and frame >= 0)
         and math.Clamp(frame, 0.02, 0.98) or defaultFrame
@@ -217,19 +248,20 @@ if SERVER then
         return true
     end
 
-    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, customSequence)
+    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, customSequence, seatMode)
         if not IsValid(npc) or not npc.NPCSitterData then
             return false, "NPC is not seated."
         end
         local data = npc.NPCSitterData
         if not IsValid(data.seat) then return false, "Seat was removed." end
         local seq, name, cycle, loop, err =
-            FindSitSequence(npc, pose, frame, customSequence)
+            FindSitSequence(npc, pose, frame, customSequence, seatMode)
         if seq == nil then return false, err end
 
         data.offset = Vector(offset.x, offset.y, offset.z)
         data.localAngles = Angle(rotation.p, rotation.y, rotation.r)
         data.pose = pose
+        data.seatMode = seatMode
         data.sequence = seq
         data.sequenceName = name
         data.poseCycle = cycle
@@ -295,7 +327,7 @@ if SERVER then
         return true
     end
 
-    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, customSequence)
+    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, customSequence, seatMode)
         if not IsValid(npc) or not npc:IsNPC() then return false, "Invalid NPC." end
         if not IsSeat(seat) then return false, "Target is not a vehicle seat." end
         if seat.GetDriver and IsValid(seat:GetDriver()) then
@@ -307,7 +339,7 @@ if SERVER then
 
         -- Validate animation first: don't parent NPCs that lack a seated pose.
         local sequence, sequenceName, cycle, looping, err =
-            FindSitSequence(npc, pose, frame, customSequence)
+            FindSitSequence(npc, pose, frame, customSequence, seatMode)
         if sequence == nil then return false, err end
         if npc.NPCSitterData then NPC_SITTER.UnseatNPC(npc, false) end
 
@@ -318,7 +350,7 @@ if SERVER then
             pos = npc:GetPos(), ang = npc:GetAngles(),
             offset = Vector(offset.x, offset.y, offset.z),
             localAngles = Angle(rotation.p, rotation.y, rotation.r),
-            pose = pose, sequence = sequence, sequenceName = sequenceName,
+            pose = pose, seatMode = seatMode, sequence = sequence, sequenceName = sequenceName,
             poseCycle = cycle, looping = looping
         }
         ReserveSeat(seat)
@@ -401,7 +433,8 @@ function TOOL:LeftClick(trace)
 
     if not IsValid(selected) and IsValid(seated) then
         local ok, err = NPC_SITTER.UpdateTransform(
-            seated, GetToolOffset(self), GetToolRotation(self), GetToolPose(self)
+            seated, GetToolOffset(self), GetToolRotation(self), GetToolPose(self),
+            GetSeatMode(self, seated.NPCSitterData.seat)
         )
         owner:ChatPrint(ok and ("[NPC Sitter] Pose updated: " .. (err or ""))
             or "[NPC Sitter] " .. (err or "Update failed."))
@@ -430,7 +463,8 @@ function TOOL:LeftClick(trace)
         return false
     end
     local ok, err = NPC_SITTER.SeatNPC(
-        selected, ent, GetToolOffset(self), GetToolRotation(self), GetToolPose(self)
+        selected, ent, GetToolOffset(self), GetToolRotation(self), GetToolPose(self),
+        GetSeatMode(self, ent)
     )
     if not ok then
         owner:ChatPrint("[NPC Sitter] " .. (err or "Could not seat NPC."))
@@ -546,6 +580,12 @@ function TOOL.BuildCPanel(panel)
             "npc_sitter_rot_p", "npc_sitter_rot_y", "npc_sitter_rot_r"
         }
     })
+    panel:Help("Seat type (the animation is held to prevent T-pose).")
+    local seatMode = panel:ComboBox("Seat mode", "npc_sitter_seat_mode")
+    seatMode:AddChoice("Automatic (detect prisoner pod)", "auto")
+    seatMode:AddChoice("Regular chair", "chair")
+    seatMode:AddChoice("Prisoner pod", "prisoner_pod")
+    panel:Help("Prisoner pods use a seated Source animation rather than a standing/rollercoaster pose. Availability depends on the NPC model.")
     panel:Help("Presets select original Source sequences actually available in each NPC model.")
     local combo = panel:ComboBox("Valve sitting animation", "npc_sitter_pose")
     combo:AddChoice("Natural chair idle (recommended)", "natural")
