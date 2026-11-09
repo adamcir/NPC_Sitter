@@ -6,70 +6,62 @@ Windows: tools\install.bat ["<path to garrysmod>"]
 PowerShell: .\tools\install.ps1 ["<path to garrysmod>"]
 Linux: bash tools/install.sh ["<path to garrysmod>"]
 
-Installer copies addon/npc_sitter into garrysmod/addons/npc_sitter,
-replacing the previous version, like the Adamovian Metro installer.
-Restart Garry's Mod after installing the update.
-
-NATIVE SOURCE ANIMATIONS (2026-10-26)
-- Removed the previous custom spine/arm angles, procedural
-  ManipulateBoneAngles modifications, clientside BuildBonePositions
-  callbacks and two-bone IK. Those made the NPC look unnatural.
-- NPCs now play REAL Source/Valve sitting animations already built
-  into their individual model: Sit_Chair02, Sit_Chair03,
-  sitchairtable1, sitcouchfeet1, sitcouchknees1, and others.
-- Select a Valve animation from the tool menu; a preset resolves to
-  an available sequence on that model, rather than modifying its
-  bones. Different presets can produce the same result if the
-  model has only one usable sitting idle.
-- The original NPC-Sitter_GMod code supplied the seating/parenting
-  approach. Native model animations are now deliberately held at a
-  seated frame with SetPlaybackRate(0); the original version could
-  finish an animation and leave the NPC in a T-pose.
-- A lightweight Think guard restores the original Source seated
-  sequence if the engine NPC AI changes it.
-- The "Natural" preset now prioritizes native Sit_Chair/chair-idle
-  before rollercoaster/couch fallback animations. Dr. Kleiner has
-  Sit_Chair (id 837 in the user's model). This avoids the hunched
-  rollercoaster default. For custom models with only couch sequences,
-  choose a better one through Custom Source sequence if available.
-- "Sitting pose frame" (-1 = automatic) chooses which original
-  animated frame to hold. You can adjust it per model/seat without
-  changing the skeleton.
-- The "Upright", "Relaxed", "Table/forward", "Vehicle", "Legacy"
-  and "Custom" preset choices, X/Y/Z offsets, rotation settings
-  and NPC-only chair reservation behavior are preserved.
-- As with the original version, an NPC with no supported sitting
-  sequence can still be attached to the chair but may look as if
-  it is standing. Use npc_sitter_list_anims to inspect models.
+Installers copy addon/npc_sitter to garrysmod/addons/npc_sitter.
+IMPORTANT: Restart Garry's Mod before testing old saves. An existing
+session can still have cyclic Lua data created by an older version.
 
 USAGE
-1. LMB an NPC and then LMB a vehicle chair.
-2. Select "Natural chair idle" or another Valve preset.
-3. Adjust X/Y/Z or Pitch/Yaw/Roll if needed.
-4. LMB the seated NPC or chair to apply new settings.
-5. RMB releases the NPC. Chair stays reserved for NPCs even
-   after NPC removal. Players cannot use it with E.
-6. Reload on an EMPTY reserved seat to unlock player seating.
+1. LMB an NPC, then LMB the vehicle seat.
+2. Seat mode: Automatic / Regular chair / Prisoner pod.
+3. Choose a Valve animation preset, custom sequence, and animation
+   frame (-1 for auto). X/Y/Z and Pitch/Yaw/Roll offsets remain.
+4. LMB seated NPC or seat to update settings; RMB releases the NPC.
+5. The seat remains reserved for NPCs even if the NPC dies/is removed.
+   Reload on an EMPTY reserved seat to unlock it for players.
+
+COMMUNITY-REQUESTED FIXES (2026-11)
+- Sandbox saves, duplications, and loading:
+  * Runtime NPC-to-seat references are now stored outside Entity:GetTable()
+    in weak-key Lua tables. The previous nested tables could be serialized
+    recursively and caused: "attempt to serialize structure with cyclic
+    reference" when saving a Sandbox world.
+  * duplicator.StoreEntityModifier records only primitive strings/numbers
+    and nested numeric offset/rotation tables. Both the NPC and seat
+    carry a matching token and position/pose settings.
+  * On duplication or loading, the addon attempts to pair pasted NPCs
+    and seats again and reapply native sitting animation and offsets.
+  * If the save contains a seat without its parented NPC, the add-on
+    attempts to recreate a standard npc_* class from the seat snapshot.
+    Nonstandard entities or models may not support recreation.
+- Killable NPCs:
+  * No godmode or damage immunity is applied to seated NPCs.
+  * A lethal hit unseats the NPC near the chair before normal
+    damage processing so normal death/ragdoll behavior can occur.
+  * The death hook cleans up the seat association. Player access stays
+    blocked until the chair is explicitly unlocked.
+- Prisoner pods:
+  * Separate selectable mode with Automatic detection.
+  * Uses a Source sitting animation held at a seated frame to
+    avoid ending in a T-pose.
+- Missing sitting animations:
+  * The tool refuses to seat a model without a usable native
+    sit/chair/couch animation rather than posing it as a standing NPC.
+
+TEST PLAN (verify in-game before claiming a fix is complete)
+1. Spawn 2 NPCs and 2 seats, seat them, save a Sandbox world, load it,
+   and check both NPCs remain seated in the corresponding seats.
+2. Duplicate seat+NPC together; then duplicate just the seat. Check
+   that a seat-only copy restores the NPC where the model allows.
+3. Reposition an NPC and save/load again; verify offset/rotation and
+   animation settings.
+4. Shoot a seated NPC until it dies and verify a normal kill and that
+   the seat is no longer occupied by a live NPC.
+5. Remove a seated NPC and try seating another in the same chair;
+   unlock the chair with Reload when empty.
+6. Test regular chair and prisoner pod modes separately.
 
 DIAGNOSTICS
-- Aim at Dr. Kleiner or another NPC and type in CLIENT console:
+Aim at an NPC and run in the client console:
     npc_sitter_list_anims
-  This lists the model's ORIGINAL sit/chair/couch animation names
-  and whether each is looped. It also displays the native
-  ACT_BUSY_SIT_CHAIR sequence.
-- To test one of the returned sequences, pick "Custom Source
-  sequence" from the menu and copy that sequence name exactly.
-- The natural preset resolves Kleiner's Sit_Chair sequence
-  (id 837 in the user-tested model). Neither IK nor manually
-  repositioning arms is used.
-
-SEAT MODES
-- Automatic (default): detect prop_vehicle_prisoner_pod and use the
-  prisoner-pod setting; otherwise use the regular chair mode.
-- Regular chair: native Source chair sitting pose.
-- Prisoner pod: native Source chair sitting pose, held at a stable
-  animation frame to avoid finishing in a T-pose.
-- Both modes retain the previous pose presets, custom sequence,
-  XYZ offsets, rotation sliders, reserved seat locks, and LMB updates.
-- A model without any native sitting animation is rejected instead
-  of being left T-posed. A supported sequence is required.
+It prints actual Source sit/chair/couch animations in that NPC model.
+For Dr. Kleiner, the game-reported sitting idle is Sit_Chair.
