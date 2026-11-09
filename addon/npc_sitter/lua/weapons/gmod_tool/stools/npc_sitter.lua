@@ -191,41 +191,112 @@ end
 
 if SERVER then
     NPC_SITTER = NPC_SITTER or {}
-    NPC_SITTER.SeatedNPCs = NPC_SITTER.SeatedNPCs or {}
 
-    local function ReserveSeat(seat)
-        if not IsReservedSeat(seat) then
-            seat.NPCSitterReserved = true
-            seat:SetNW2Bool("NPCSitter_Reserved", true)
-            seat:Fire("Lock", "", 0)
+    -- CRITICAL: no Entity references or cyclic tables in Entity:GetTable().
+    -- Sandbox SaveMap and duplicator recursively serialize that table.
+    -- Storing npc.NPCSitterData = { seat = ent } and
+    -- seat.NPCSitterNPC = npc caused "cyclic reference" and broken saves.
+    -- Runtime relationships are weak-keyed and exist OUTSIDE both entities.
+    local seated = setmetatable({}, {__mode = "k"})
+    local occupants = setmetatable({}, {__mode = "k"})
+    local reservations = setmetatable({}, {__mode = "k"})
+    local pending = {}
+    local nextToken = 0
+    local MOD = "NPCSitterState"
+
+    local function NewToken()
+        nextToken = nextToken + 1
+        return string.format("%s-%d-%d", game.GetMap(), math.floor(SysTime() * 1000), nextToken)
+    end
+
+    -- Public API for other add-ons. Do not store these tables on entities.
+    function NPC_SITTER.GetData(npc) return seated[npc] end
+    function NPC_SITTER.GetOccupant(seat) return occupants[seat] end
+    function NPC_SITTER.IsReserved(seat)
+        return IsValid(seat) and (reservations[seat] == true
+            or seat:GetNW2Bool("NPCSitter_Reserved", false))
+    end
+
+    local function ClearLegacyFields(npc, seat)
+        if IsValid(npc) then npc.NPCSitterData = nil end
+        if IsValid(seat) then seat.NPCSitterNPC = nil end
+    end
+
+    local function GetStoredNumber(t, key, fallback)
+        local n = t and tonumber(t[key]) or nil
+        return n or fallback
+    end
+
+    local function EncodePose(npc, data)
+        return {
+            role = "npc",
+            token = data.token,
+            mode = data.seatMode,
+            pose = data.pose,
+            cycle = data.poseCycleRequested,
+            sequence = data.customSequence,
+            offset = {x = data.offset.x, y = data.offset.y, z = data.offset.z},
+            angles = {p = data.localAngles.p, y = data.localAngles.y, r = data.localAngles.r}
+        }
+    end
+
+    local function StoreBoth(npc, data)
+        if not IsValid(npc) or not IsValid(data.seat) then return end
+        local seat = data.seat
+        local pair = EncodePose(npc, data)
+        local seatRecord = table.Copy(pair)
+        seatRecord.role = "seat"
+        seatRecord.reserved = true
+        -- Seat-only saves need enough data to recreate a missing NPC.
+        -- Only JSON-safe primitives: never an actual Entity reference.
+        seatRecord.npcClass = npc:GetClass()
+        seatRecord.npcModel = npc:GetModel()
+        seatRecord.npcHealth = npc:Health()
+
+        duplicator.ClearEntityModifier(npc, MOD)
+        duplicator.StoreEntityModifier(npc, MOD, pair)
+        duplicator.ClearEntityModifier(seat, MOD)
+        duplicator.StoreEntityModifier(seat, MOD, seatRecord)
+    end
+
+    local function StoreEmptyReservation(seat)
+        if not IsValid(seat) then return end
+        duplicator.ClearEntityModifier(seat, MOD)
+        if NPC_SITTER.IsReserved(seat) then
+            duplicator.StoreEntityModifier(seat, MOD, {
+                role = "seat", reserved = true
+            })
         end
     end
 
+    local function SetReserved(seat, value)
+        if not IsValid(seat) then return end
+        reservations[seat] = value and true or nil
+        seat:SetNW2Bool("NPCSitter_Reserved", value and true or false)
+        -- Prevent native E use as well as vehicle entry, without replacing
+        -- Use() or creating a permanently invisible player driver.
+        seat:Fire(value and "Lock" or "Unlock", "", 0)
+    end
+
     function NPC_SITTER.ReleaseSeatReservation(seat)
-        if not IsReservedSeat(seat) or IsValid(seat.NPCSitterNPC) then return false end
-        seat.NPCSitterReserved = nil
-        seat:SetNW2Bool("NPCSitter_Reserved", false)
-        seat:Fire("Unlock", "", 0)
+        if not NPC_SITTER.IsReserved(seat) or IsValid(occupants[seat]) then
+            return false
+        end
+        SetReserved(seat, false)
+        StoreEmptyReservation(seat)
         return true
     end
 
-    -- Keep previously NPC-used seats inaccessible to players, even if
-    -- an NPC is deleted by cleanup/Undo. Reload on an empty seat unlocks it.
     hook.Add("CanPlayerEnterVehicle", "NPCSitter_ReserveVehicle", function(_, vehicle)
-        if IsReservedSeat(vehicle) then return false end
+        if NPC_SITTER.IsReserved(vehicle) then return false end
     end)
-
     hook.Add("PlayerUse", "NPCSitter_BlockUse", function(_, ent)
-        if IsReservedSeat(ent) then return false end
+        if NPC_SITTER.IsReserved(ent) then return false end
     end)
 
-    -- Keep the native Source seated sequence active and held on a safe
-    -- frame. Non-looping model animations otherwise return to standing or
-    -- T-pose; engine NPCs may also replace sequences via their AI.
     local function ApplySitPose(npc, force)
-        if not IsValid(npc) then return false end
-        local data = npc.NPCSitterData
-        if not data or data.sequence == nil then return false end
+        local data = seated[npc]
+        if not IsValid(npc) or not data then return false end
 
         if npc:GetNPCState() ~= NPC_STATE_SCRIPT then
             npc:SetNPCState(NPC_STATE_SCRIPT)
@@ -233,14 +304,10 @@ if SERVER then
         if rawget(_G, "ACT_DO_NOT_DISTURB") and npc.SetIdealActivity then
             npc:SetIdealActivity(ACT_DO_NOT_DISTURB)
         end
-
         if force or npc:GetSequence() ~= data.sequence then
             npc:ResetSequence(data.sequence)
             npc:ResetSequenceInfo()
         end
-
-        -- With a held frame we preserve the MODEL'S authored joints and
-        -- arms; absolutely no procedural bone manipulation is necessary.
         npc:SetPlaybackRate(0)
         if force or math.abs(npc:GetCycle() - data.poseCycle) > 0.005 then
             npc:SetCycle(data.poseCycle)
@@ -248,62 +315,28 @@ if SERVER then
         return true
     end
 
-    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, customSequence, seatMode)
-        if not IsValid(npc) or not npc.NPCSitterData then
-            return false, "NPC is not seated."
-        end
-        local data = npc.NPCSitterData
-        if not IsValid(data.seat) then return false, "Seat was removed." end
-        local seq, name, cycle, loop, err =
-            FindSitSequence(npc, pose, frame, customSequence, seatMode)
-        if seq == nil then return false, err end
-
-        data.offset = Vector(offset.x, offset.y, offset.z)
-        data.localAngles = Angle(rotation.p, rotation.y, rotation.r)
-        data.pose = pose
-        data.seatMode = seatMode
-        data.sequence = seq
-        data.sequenceName = name
-        data.poseCycle = cycle
-        data.looping = loop
-
-        if npc:GetParent() ~= data.seat then npc:SetParent(data.seat) end
-        npc:SetLocalPos(data.offset)
-        npc:SetLocalAngles(data.localAngles)
-        ApplySitPose(npc, true)
-        return true, string.format("Source seated pose: %s (frame %.2f)",
-            name, cycle)
-    end
-
-    local function RestoreNPC(npc, data, nextToSeat)
+    local function RestoreNPC(npc, data, beside, stay)
         local seat = data.seat
+        local worldPos, worldAngles = npc:GetPos(), npc:GetAngles()
         npc:SetParent(NULL)
         npc:SetPlaybackRate(1)
         npc:SetCycle(0)
         npc:SetMoveType(data.moveType or MOVETYPE_STEP)
-        if data.collisionGroup ~= nil then
-            npc:SetCollisionGroup(data.collisionGroup)
-        else
-            npc:SetCollisionGroup(COLLISION_GROUP_NPC)
-        end
+        npc:SetCollisionGroup(data.collisionGroup or COLLISION_GROUP_NPC)
         if npc:IsNPC() then
             if npc.ClearSchedule then npc:ClearSchedule() end
             if data.npcState ~= nil then npc:SetNPCState(data.npcState) end
-            if data.idealActivity ~= nil and npc.SetIdealActivity then
+            if data.idealActivity and npc.SetIdealActivity then
                 npc:SetIdealActivity(data.idealActivity)
             end
         end
-        if nextToSeat and IsValid(seat) then
-            local pos = seat:GetPos() + seat:GetRight() * 55 + Vector(0, 0, 12)
-            local tr = util.TraceHull({
-                start = pos + Vector(0, 0, 32),
-                endpos = pos - Vector(0, 0, 64),
-                mins = Vector(-16, -16, 0),
-                maxs = Vector(16, 16, 72),
-                filter = {npc, seat},
-                mask = MASK_NPCSOLID
-            })
-            npc:SetPos(tr.Hit and tr.HitPos or pos)
+        if stay then
+            -- Keep the world location on death so ragdolls appear near the
+            -- chair rather than back at the NPC's original spawn location.
+            npc:SetPos(worldPos)
+            npc:SetAngles(worldAngles)
+        elseif beside and IsValid(seat) then
+            npc:SetPos(seat:GetPos() + seat:GetRight() * 55 + Vector(0, 0, 12))
             npc:SetAngles(Angle(0, seat:GetAngles().y, 0))
             timer.Simple(0, function()
                 if IsValid(npc) then npc:DropToFloor() end
@@ -314,105 +347,228 @@ if SERVER then
         end
     end
 
-    function NPC_SITTER.UnseatNPC(npc, nextToSeat)
+    function NPC_SITTER.UnseatNPC(npc, beside, stay)
         if not IsValid(npc) then return false end
-        local data = npc.NPCSitterData
+        local data = seated[npc]
         if not data then return false end
-        NPC_SITTER.SeatedNPCs[npc] = nil
-        if IsValid(data.seat) and data.seat.NPCSitterNPC == npc then
-            data.seat.NPCSitterNPC = nil
+        seated[npc] = nil
+        local seat = data.seat
+        if IsValid(seat) and occupants[seat] == npc then
+            occupants[seat] = nil
         end
-        npc.NPCSitterData = nil
-        RestoreNPC(npc, data, nextToSeat)
+        duplicator.ClearEntityModifier(npc, MOD)
+        ClearLegacyFields(npc, seat)
+        RestoreNPC(npc, data, beside, stay)
+        if IsValid(seat) then StoreEmptyReservation(seat) end
         return true
     end
 
-    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, customSequence, seatMode)
+    function NPC_SITTER.UpdateTransform(npc, offset, rotation, pose, frame, custom, mode)
+        local data = seated[npc]
+        if not IsValid(npc) or not data then return false, "NPC not seated." end
+        if not IsValid(data.seat) then return false, "Seat no longer exists." end
+
+        local sequence, name, cycle, looping, err =
+            FindSitSequence(npc, pose, frame, custom, mode)
+        if sequence == nil then return false, err end
+
+        data.offset = Vector(offset.x, offset.y, offset.z)
+        data.localAngles = Angle(rotation.p, rotation.y, rotation.r)
+        data.pose, data.sequence, data.sequenceName = pose, sequence, name
+        data.poseCycle, data.looping = cycle, looping
+        data.poseCycleRequested = frame
+        data.customSequence = custom
+        data.seatMode = mode
+        if npc:GetParent() ~= data.seat then npc:SetParent(data.seat) end
+        npc:SetLocalPos(data.offset)
+        npc:SetLocalAngles(data.localAngles)
+        ApplySitPose(npc, true)
+        StoreBoth(npc, data)
+        return true, string.format("%s: %s (frame %.2f)", mode, name, cycle)
+    end
+
+    function NPC_SITTER.SeatNPC(npc, seat, offset, rotation, pose, frame, custom, mode)
         if not IsValid(npc) or not npc:IsNPC() then return false, "Invalid NPC." end
         if not IsSeat(seat) then return false, "Target is not a vehicle seat." end
         if seat.GetDriver and IsValid(seat:GetDriver()) then
-            return false, "A player is already in this seat."
+            return false, "A player is already in the seat."
         end
-        if IsValid(seat.NPCSitterNPC) and seat.NPCSitterNPC ~= npc then
-            return false, "Seat already contains an NPC."
+        if IsValid(occupants[seat]) and occupants[seat] ~= npc then
+            return false, "This seat contains another NPC."
         end
-
-        -- Validate animation first: don't parent NPCs that lack a seated pose.
-        local sequence, sequenceName, cycle, looping, err =
-            FindSitSequence(npc, pose, frame, customSequence, seatMode)
+        local sequence, name, cycle, looping, err =
+            FindSitSequence(npc, pose, frame, custom, mode)
         if sequence == nil then return false, err end
-        if npc.NPCSitterData then NPC_SITTER.UnseatNPC(npc, false) end
+        if seated[npc] then NPC_SITTER.UnseatNPC(npc, false) end
 
-        npc.NPCSitterData = {
-            seat = seat, moveType = npc:GetMoveType(),
-            collisionGroup = npc:GetCollisionGroup(), npcState = npc:GetNPCState(),
-            idealActivity = npc:GetIdealActivity(),
+        local data = {
+            token = NewToken(), seat = seat, seatMode = mode,
+            pose = pose, sequence = sequence, sequenceName = name,
+            looping = looping, poseCycle = cycle,
+            poseCycleRequested = frame, customSequence = custom,
+            moveType = npc:GetMoveType(), collisionGroup = npc:GetCollisionGroup(),
+            npcState = npc:GetNPCState(), idealActivity = npc:GetIdealActivity(),
             pos = npc:GetPos(), ang = npc:GetAngles(),
             offset = Vector(offset.x, offset.y, offset.z),
-            localAngles = Angle(rotation.p, rotation.y, rotation.r),
-            pose = pose, seatMode = seatMode, sequence = sequence, sequenceName = sequenceName,
-            poseCycle = cycle, looping = looping
+            localAngles = Angle(rotation.p, rotation.y, rotation.r)
         }
-        ReserveSeat(seat)
-        seat.NPCSitterNPC = npc
-        NPC_SITTER.SeatedNPCs[npc] = true
+        ClearLegacyFields(npc, seat)
+        seated[npc], occupants[seat] = data, npc
+        SetReserved(seat, true)
+
         npc:SetNPCState(NPC_STATE_SCRIPT)
         npc:SetSchedule(SCHED_WAIT_FOR_SCRIPT)
         npc:SetMoveType(MOVETYPE_NONE)
         npc:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
         npc:SetParent(seat)
-        npc:SetLocalPos(npc.NPCSitterData.offset)
-        npc:SetLocalAngles(npc.NPCSitterData.localAngles)
+        npc:SetLocalPos(data.offset)
+        npc:SetLocalAngles(data.localAngles)
         ApplySitPose(npc, true)
-        return true, string.format("Source seated pose: %s (frame %.2f)",
-            sequenceName, cycle)
+        StoreBoth(npc, data)
+        return true, string.format("%s: %s (frame %.2f)", mode, name, cycle)
     end
+
+    -- Duplication/Sandbox saves persist the seating *as data*, not as
+    -- nested Entity pointers. Both NPC and seat get a serializable modifier.
+    -- The pasted pair is relinked once both entities are created.
+    local function RestorePair(npc, seat, info)
+        if not IsValid(npc) or not IsValid(seat) or not npc:IsNPC()
+            or not IsSeat(seat) then return false end
+        if IsValid(occupants[seat]) then return false end
+        local offsetInfo, angleInfo = info.offset or {}, info.angles or {}
+        local mode = info.mode == "prisoner_pod" and "prisoner_pod" or "chair"
+        local pose = VALVE_POSES[info.pose] and info.pose or
+            (info.pose == "custom" and "custom" or "natural")
+        local frame = math.Clamp(GetStoredNumber(info, "cycle", -1), -1, 1)
+        local ok = NPC_SITTER.SeatNPC(
+            npc, seat,
+            Vector(GetStoredNumber(offsetInfo, "x", 0),
+                   GetStoredNumber(offsetInfo, "y", 0),
+                   GetStoredNumber(offsetInfo, "z", 0)),
+            Angle(GetStoredNumber(angleInfo, "p", 0),
+                  GetStoredNumber(angleInfo, "y", 0),
+                  GetStoredNumber(angleInfo, "r", 0)),
+            pose, frame, tostring(info.sequence or ""), mode
+        )
+        return ok == true
+    end
+
+    local function RestoreMissingNPC(seat, info)
+        if not IsValid(seat) or not IsSeat(seat)
+            or IsValid(occupants[seat]) then return end
+        local class = info.npcClass
+        if type(class) ~= "string" or not string.StartWith(class, "npc_") then
+            return
+        end
+        local npc = ents.Create(class)
+        if not IsValid(npc) then return end
+        npc:SetPos(seat:GetPos())
+        npc:SetAngles(seat:GetAngles())
+        npc:Spawn()
+        npc:Activate()
+        if type(info.npcModel) == "string" and info.npcModel ~= ""
+            and util.IsValidModel(info.npcModel) then
+            npc:SetModel(info.npcModel)
+        end
+        if not RestorePair(npc, seat, info) then
+            npc:Remove()
+        else
+            if type(info.npcHealth) == "number" and info.npcHealth > 0 then
+                npc:SetHealth(info.npcHealth)
+            end
+        end
+    end
+
+    local function QueueRestore(ent, info)
+        if type(info) ~= "table" then return end
+        if info.role == "seat" and IsSeat(ent) then
+            SetReserved(ent, info.reserved == true)
+        end
+        if not info.token or type(info.token) ~= "string" then return end
+        local entry = pending[info.token] or {info = info}
+        pending[info.token] = entry
+        if info.role == "seat" and IsSeat(ent) then
+            entry.seat = ent
+            entry.info = info -- seat stores model/class fallback
+        elseif info.role == "npc" and ent:IsNPC() then
+            entry.npc = ent
+        else
+            return
+        end
+        if not entry.scheduled then
+            entry.scheduled = true
+            timer.Simple(1.0, function()
+                if pending[info.token] ~= entry then return end
+                pending[info.token] = nil
+                if IsValid(entry.seat) and IsValid(entry.npc) then
+                    RestorePair(entry.npc, entry.seat, entry.info)
+                elseif IsValid(entry.seat) then
+                    -- Some Sandbox saves duplicate the seat but omit a
+                    -- parented NPC. Restore from the seat-side snapshot.
+                    RestoreMissingNPC(entry.seat, entry.info)
+                end
+            end)
+        end
+    end
+
+    duplicator.RegisterEntityModifier(MOD, function(_, ent, info)
+        if IsValid(ent) then QueueRestore(ent, info) end
+    end)
+
+    -- Seated NPCs remain killable. Let the engine apply normal NPC damage.
+    -- Before lethal damage, detach them so their death/ragdoll doesn't keep
+    -- the vehicle parent. Do not modify damage, or override other addons.
+    hook.Add("EntityTakeDamage", "NPCSitter_LethalDamage", function(npc, dmg)
+        if not seated[npc] or not npc:IsNPC() then return end
+        if dmg:GetDamage() > 0 and dmg:GetDamage() >= npc:Health() then
+            NPC_SITTER.UnseatNPC(npc, false, true)
+        end
+    end)
+    hook.Add("OnNPCKilled", "NPCSitter_NPCKilled", function(npc)
+        if seated[npc] then NPC_SITTER.UnseatNPC(npc, false, true) end
+    end)
 
     local nextCheck = 0
     hook.Add("Think", "NPCSitter_HoldSitPose", function()
         if CurTime() < nextCheck then return end
-        nextCheck = CurTime() + 0.08
-        for npc in pairs(NPC_SITTER.SeatedNPCs) do
-            if not IsValid(npc) or not npc.NPCSitterData then
-                NPC_SITTER.SeatedNPCs[npc] = nil
+        nextCheck = CurTime() + 0.1
+        for npc, data in pairs(seated) do
+            if not IsValid(npc) then
+                seated[npc] = nil
+            elseif not IsValid(data.seat) then
+                NPC_SITTER.UnseatNPC(npc, false, true)
             else
-                local data = npc.NPCSitterData
-                if not IsValid(data.seat) then
-                    NPC_SITTER.UnseatNPC(npc, false)
-                else
-                    -- Keep positions synced while the chair moves.
-                    if npc:GetParent() ~= data.seat then
-                        npc:SetParent(data.seat)
-                    end
-                    npc:SetLocalPos(data.offset)
-                    npc:SetLocalAngles(data.localAngles)
-                    ApplySitPose(npc, false)
-                end
+                if npc:GetParent() ~= data.seat then npc:SetParent(data.seat) end
+                npc:SetLocalPos(data.offset)
+                npc:SetLocalAngles(data.localAngles)
+                ApplySitPose(npc, false)
             end
         end
     end)
 
     hook.Add("EntityRemoved", "NPCSitter_EntityRemoved", function(ent)
-        if ent.NPCSitterData then
-            local seat = ent.NPCSitterData.seat
-            NPC_SITTER.SeatedNPCs[ent] = nil
-            if IsValid(seat) and seat.NPCSitterNPC == ent then
-                seat.NPCSitterNPC = nil
-            end
-            ent.NPCSitterData = nil
-        end
-        if ent.NPCSitterNPC then
-            local npc = ent.NPCSitterNPC
-            ent.NPCSitterNPC = nil
-            if IsValid(npc) and npc.NPCSitterData then
-                NPC_SITTER.SeatedNPCs[npc] = nil
-                local data = npc.NPCSitterData
-                npc.NPCSitterData = nil
-                timer.Simple(0, function()
-                    if IsValid(npc) then RestoreNPC(npc, data, false) end
-                end)
+        if seated[ent] then
+            local data = seated[ent]
+            seated[ent] = nil
+            if IsValid(data.seat) then
+                occupants[data.seat] = nil
+                StoreEmptyReservation(data.seat)
             end
         end
+        if occupants[ent] then
+            local npc = occupants[ent]
+            occupants[ent] = nil
+            if IsValid(npc) and seated[npc] then
+                -- Source vehicle is already going away; remove the link.
+                local data = seated[npc]
+                seated[npc] = nil
+                npc:SetParent(NULL)
+                npc:SetMoveType(data.moveType or MOVETYPE_STEP)
+                npc:SetCollisionGroup(data.collisionGroup or COLLISION_GROUP_NPC)
+                duplicator.ClearEntityModifier(npc, MOD)
+            end
+        end
+        reservations[ent] = nil
     end)
 end
 
@@ -425,9 +581,9 @@ function TOOL:LeftClick(trace)
 
     local selected = self.SelectedNPC
     local seated
-    if IsSeat(ent) and IsValid(ent.NPCSitterNPC) then
-        seated = ent.NPCSitterNPC
-    elseif ent:IsNPC() and ent.NPCSitterData then
+    if IsSeat(ent) and IsValid(NPC_SITTER.GetOccupant(ent)) then
+        seated = NPC_SITTER.GetOccupant(ent)
+    elseif ent:IsNPC() and NPC_SITTER.GetData(ent) then
         seated = ent
     end
 
@@ -436,7 +592,7 @@ function TOOL:LeftClick(trace)
         local ok, err = NPC_SITTER.UpdateTransform(
             seated, GetToolOffset(self), GetToolRotation(self),
             pose, frame, customSequence,
-            GetSeatMode(self, seated.NPCSitterData.seat)
+            GetSeatMode(self, NPC_SITTER.GetData(seated).seat)
         )
         owner:ChatPrint(ok and ("[NPC Sitter] Pose updated: " .. (err or ""))
             or "[NPC Sitter] " .. (err or "Update failed."))
@@ -485,10 +641,10 @@ function TOOL:RightClick(trace)
     local ent = trace.Entity
     if not IsValid(ent) then return false end
     local npc
-    if ent:IsNPC() and ent.NPCSitterData then
+    if ent:IsNPC() and NPC_SITTER.GetData(ent) then
         npc = ent
-    elseif IsSeat(ent) and IsValid(ent.NPCSitterNPC) then
-        npc = ent.NPCSitterNPC
+    elseif IsSeat(ent) and IsValid(NPC_SITTER.GetOccupant(ent)) then
+        npc = NPC_SITTER.GetOccupant(ent)
     end
     if not IsValid(npc) then
         if IsValid(owner) then owner:ChatPrint("[NPC Sitter] Aim at seated NPC/seat.") end
@@ -509,7 +665,7 @@ function TOOL:Reload(trace)
     self.SelectedNPC = nil
     if not IsValid(owner) then return false end
     owner:SetNW2Entity("NPCSitter_SelectedNPC", NULL)
-    if IsReservedSeat(trace.Entity) and
+    if NPC_SITTER.IsReserved(trace.Entity) and
         NPC_SITTER.ReleaseSeatReservation(trace.Entity) then
         owner:ChatPrint("[NPC Sitter] Empty seat unlocked for players.")
     else
